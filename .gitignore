@@ -1,0 +1,37 @@
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/*.local
+
+# Python / backend
+backend/venv/
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+
+# Runtime data (never commit user telemetry)
+backend/storage/
+backend/telemetry.db
+*.db
+*.sqlite
+*.sqlite3
+
+# Deploy helpers and bundles
+*.tar.gz
+deploy-ssh.ps1
+kirim-ke-vps.bat
+cek-vps.bat
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
