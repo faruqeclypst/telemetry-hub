@@ -58,11 +58,22 @@ export default function Track3DModal({
   const [isMinimapCollapsed, setIsMinimapCollapsed] = useState(false);
   const [showHud, setShowHud] = useState(true);
 
+  // Layout tier for the full-screen replay. Compact keeps the canvas usable on
+  // laptops and phones instead of letting the sidebar and toolbar eat the view.
+  const [layoutTier, setLayoutTier] = useState('wide');
+
   // Chase Camera Smoothing Refs (Zero-Jitter critically damped crane)
   const chasePosRef = useRef(new THREE.Vector3());
   const chaseLookTargetRef = useRef(new THREE.Vector3());
   const chaseCamHeadingRef = useRef(null);
   const isChaseCamInitRef = useRef(false);
+
+  // Orbit camera: the free camera owns its own position/target once the user
+  // grabs it, so the target is only re-anchored when orbit mode is entered or
+  // the focused car changes. Re-anchoring every frame fights OrbitControls'
+  // wheel dolly and makes the view lurch and spin.
+  const orbitInitRef = useRef(false);
+  const orbitFocusRef = useRef(null);
 
   // Animation & Rendering Refs (60 FPS direct engine)
   const replayTimeRef = useRef(0);
@@ -542,19 +553,32 @@ export default function Track3DModal({
     };
   }, [isOpen, normalizedSamples, spline, isComparing, normalizedCompSamples, compList, corners, refLapNumber, compLapNumber]);
 
-  // Resize Three.js viewport when HUD is toggled
+  // Pick a layout tier from the viewport so the replay stays usable on narrow
+  // screens. wide >= 1100px, mid >= 760px, compact below that.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const apply = () => {
+      const w = window.innerWidth;
+      setLayoutTier(w >= 1100 ? 'wide' : w >= 760 ? 'mid' : 'compact');
+    };
+    apply();
+    window.addEventListener('resize', apply);
+    return () => window.removeEventListener('resize', apply);
+  }, [isOpen]);
+
+  // Resize Three.js viewport when HUD is toggled or the layout tier changes
   useEffect(() => {
     if (!mountRef.current || !rendererRef.current || !cameraRef.current) return;
     const timer = setTimeout(() => {
       if (!mountRef.current || !rendererRef.current || !cameraRef.current) return;
       const w = mountRef.current.clientWidth;
       const h = mountRef.current.clientHeight;
-      cameraRef.current.aspect = w / h;
+      cameraRef.current.aspect = w / Math.max(1, h);
       cameraRef.current.updateProjectionMatrix();
       rendererRef.current.setSize(w, h);
     }, 40);
     return () => clearTimeout(timer);
-  }, [showHud]);
+  }, [showHud, layoutTier]);
 
   // Update 3D car visual styling (solid vs ghost opacity, label badge state) on activeCar switch
   useEffect(() => {
@@ -780,6 +804,14 @@ export default function Track3DModal({
         const mode = cameraModeRef.current;
         const currentZoom = zoomLevelRef.current || 1.0;
 
+        // Leaving orbit for any guided mode invalidates the free camera anchor,
+        // so the next orbit entry re-seeds cleanly instead of reusing a stale
+        // position that a previous dolly left far from the car.
+        if (mode !== 'orbit') {
+          orbitInitRef.current = false;
+          orbitFocusRef.current = null;
+        }
+
         // Hide focused car's roof tag in hood/cockpit mode so view stays unobstructed
         if (carRef.current?.userData?.labelObj?.sprite) {
           carRef.current.userData.labelObj.sprite.visible = !(mode === 'cockpit' && !isGhostActive);
@@ -890,12 +922,30 @@ export default function Track3DModal({
           cameraRef.current.position.set(targetX, targetY + altitude, targetZ);
           cameraRef.current.lookAt(targetX, targetY, targetZ);
         } else {
-          // Free Orbit
+          // Free Orbit. Anchor the target once per entry (or when the focused
+          // car changes) and let OrbitControls drive thereafter, otherwise the
+          // per-frame re-target fights the user's zoom and pan.
           controlsRef.current.enabled = true;
           isChaseCamInitRef.current = false;
           chaseCamHeadingRef.current = null;
-          controlsRef.current.target.set(targetX, targetY + 0.5, targetZ);
-          controlsRef.current.update();
+          const focusKey = `${isGhostActive ? 'ghost' : 'driver'}:${activeCarRef.current}`;
+          if (!orbitInitRef.current || orbitFocusRef.current !== focusKey) {
+            orbitInitRef.current = true;
+            orbitFocusRef.current = focusKey;
+            // Re-apply the dolly limits in case a guided mode left different
+            // expectations, then seed from a sensible offset so entering orbit
+            // always shows the car rather than a stale teleported camera.
+            controlsRef.current.minDistance = 4;
+            controlsRef.current.maxDistance = 2500;
+            const orbitDist = Math.max(8.0, Math.min(30.0, 14.0 / currentZoom));
+            cameraRef.current.position.set(
+              targetX - Math.sin(targetHeading) * orbitDist,
+              targetY + orbitDist * 0.45,
+              targetZ - Math.cos(targetHeading) * orbitDist
+            );
+            controlsRef.current.target.set(targetX, targetY + 0.5, targetZ);
+            controlsRef.current.update();
+          }
         }
 
         // 2e. Update Projector Headlights, Skidmarks, Delta Tag, and Engine Audio
@@ -1405,6 +1455,15 @@ export default function Track3DModal({
     ? (samples.length === 0 ? 'empty' : 'insufficient')
     : 'ready';
 
+  const isCompact = layoutTier === 'compact';
+  const isMid = layoutTier === 'mid';
+  const isNarrow = isCompact || isMid;
+
+  // The HUD is a side panel on wide screens but becomes an overlay on narrow
+  // ones, so it stops shrinking the 3D canvas to nothing.
+  const hudWidth = isCompact ? 260 : 320;
+  const hudIsOverlay = isNarrow;
+
   return (
     <div style={{
       position: 'fixed',
@@ -1417,24 +1476,28 @@ export default function Track3DModal({
     }}>
       {/* 1. Header Toolbar */}
       <div style={{
-        height: '52px',
-        padding: '0 1.25rem',
+        minHeight: '52px',
+        padding: isNarrow ? '0.4rem 0.7rem' : '0 1.25rem',
         background: '#11151c',
         borderBottom: '1px solid #232b36',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
+        flexWrap: isNarrow ? 'wrap' : 'nowrap',
+        gap: isNarrow ? '0.4rem' : 0,
         zIndex: 10
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.85rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '700', fontSize: '0.95rem', color: '#e8edf2' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: isNarrow ? '0.5rem' : '0.85rem', flexWrap: 'wrap', minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', fontWeight: '700', fontSize: isNarrow ? '0.82rem' : '0.95rem', color: '#e8edf2' }}>
             <span className="tag tag-comp" style={{ letterSpacing: '0.05em' }}>3D REPLAY</span>
             <span>{trackName}</span>
           </div>
 
-          <span style={{ fontSize: '0.8rem', color: '#9aa6b2' }}>
-            {carName} &bull; <strong style={{ color: '#e8edf2' }}>{driverName}</strong>
-          </span>
+          {!isCompact && (
+            <span style={{ fontSize: '0.8rem', color: '#9aa6b2' }}>
+              {carName} &bull; <strong style={{ color: '#e8edf2' }}>{driverName}</strong>
+            </span>
+          )}
 
           {isComparing ? (
             <span className="tag tag-warn" style={{ fontSize: '0.7rem' }}>
@@ -1467,7 +1530,7 @@ export default function Track3DModal({
         </div>
 
         {/* Camera, Lighting, Sound & Zoom Controls */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.55rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: isNarrow ? '0.35rem' : '0.55rem', flexWrap: 'wrap', justifyContent: 'flex-end', minWidth: 0 }}>
 
           {/* Engine Audio Toggle */}
           <button
@@ -1755,9 +1818,10 @@ export default function Track3DModal({
         {/* ------------------------------------------------------------------ */}
         <div style={{
           position: 'absolute',
-          bottom: '128px',
-          left: '20px',
-          width: isMinimapCollapsed ? 'auto' : '280px',
+          bottom: isCompact ? '150px' : '128px',
+          left: isCompact ? '10px' : '20px',
+          width: isMinimapCollapsed ? 'auto' : isCompact ? '200px' : '280px',
+          maxWidth: isCompact ? '60vw' : 'none',
           background: 'rgba(10, 14, 22, 0.94)',
           border: '1px solid #232b36',
           borderRadius: '8px',
@@ -2012,18 +2076,18 @@ export default function Track3DModal({
         {/* ------------------------------------------------------------------ */}
         <div style={{
           position: 'absolute',
-          bottom: '16px',
-          left: '20px',
-          right: showHud ? '340px' : '20px',
+          bottom: isCompact ? '10px' : '16px',
+          left: isCompact ? '10px' : '20px',
+          right: showHud && !hudIsOverlay ? '340px' : isCompact ? '10px' : '20px',
           background: 'rgba(10, 14, 22, 0.94)',
           border: '1px solid #232b36',
           borderRadius: '8px',
-          padding: '0.65rem 1rem',
+          padding: isCompact ? '0.5rem 0.6rem' : '0.65rem 1rem',
           display: 'flex',
           flexDirection: 'column',
           gap: '0.45rem',
           boxShadow: '0 8px 30px rgba(0,0,0,0.7)',
-          zIndex: 20,
+          zIndex: 26,
           transition: 'right 0.2s ease'
         }}>
           {/* Progress Timeline Scrubber */}
@@ -2108,15 +2172,20 @@ export default function Track3DModal({
         {/* ------------------------------------------------------------------ */}
         {showHud && viewportState === 'ready' && (
         <div style={{
-          width: '320px',
-          background: '#11151c',
+          width: `${hudWidth}px`,
+          maxWidth: isCompact ? '82vw' : 'none',
+          flexShrink: 0,
+          background: isNarrow ? 'rgba(17, 21, 28, 0.96)' : '#11151c',
           borderLeft: '1px solid #232b36',
           display: 'flex',
           flexDirection: 'column',
           overflowY: 'auto',
-          padding: '1rem',
-          gap: '0.85rem',
-          zIndex: 10
+          padding: isCompact ? '0.7rem' : '1rem',
+          gap: isCompact ? '0.6rem' : '0.85rem',
+          zIndex: isNarrow ? 25 : 10,
+          ...(hudIsOverlay
+            ? { position: 'absolute', top: 0, right: 0, bottom: 0, boxShadow: '-12px 0 30px rgba(0,0,0,0.55)' }
+            : {})
         }}>
           {/* Header */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #232b36', paddingBottom: '0.5rem' }}>

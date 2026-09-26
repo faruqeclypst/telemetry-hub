@@ -161,6 +161,20 @@ function HeadToHeadPanel({
     return () => ro.disconnect();
   }, []);
 
+  // The shared hoverIndex is an index into the reference lap samples, while this
+  // panel plots the distance-aligned comparison array. Convert through the
+  // normalized lap fraction so the cursor stays synced with the other panels.
+  // These must be declared before the draw effect that reads them.
+  const hoverPct = useMemo(() => {
+    if (hoverIndex === null || sampleCount < 2) return null;
+    return Math.max(0, Math.min(1, hoverIndex / (sampleCount - 1)));
+  }, [hoverIndex, sampleCount]);
+
+  const comparisonHoverIdx = useMemo(() => {
+    if (hoverPct === null || comparison.length < 2) return null;
+    return Math.round(hoverPct * (comparison.length - 1));
+  }, [hoverPct, comparison.length]);
+
   // Draw the speed traces and the delta band.
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -340,19 +354,6 @@ function HeadToHeadPanel({
   };
 
   const totalDelta = comparisonData?.total_delta ?? null;
-
-  // The shared hoverIndex is an index into the reference lap samples, while this
-  // panel plots the distance-aligned comparison array. Convert through the
-  // normalized lap fraction so the cursor stays synced with the other panels.
-  const hoverPct = useMemo(() => {
-    if (hoverIndex === null || sampleCount < 2) return null;
-    return Math.max(0, Math.min(1, hoverIndex / (sampleCount - 1)));
-  }, [hoverIndex, sampleCount]);
-
-  const comparisonHoverIdx = useMemo(() => {
-    if (hoverPct === null || comparison.length < 2) return null;
-    return Math.round(hoverPct * (comparison.length - 1));
-  }, [hoverPct, comparison.length]);
 
   return (
     <section className="panel" aria-label="Head to head qualifying comparison">
