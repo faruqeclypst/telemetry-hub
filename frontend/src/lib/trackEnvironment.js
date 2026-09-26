@@ -330,7 +330,7 @@ export function createSkyDome(scene, initialMode = 'night') {
 // 4. Continuous Trackside Grass Verges & Embankment Skirt (Seals Road Underneath)
 // ============================================================================
 
-export function buildTrackGrassRibbons(spline, minTrackY = 0) {
+export function buildTrackGrassRibbons(spline, _minTrackY = 0) {
   if (!spline || spline.sampleCount < 8) return null;
 
   const { sampleCount, closed, positions, normals, arcLength } = spline;
@@ -427,8 +427,9 @@ export function buildTrackGrassRibbons(spline, minTrackY = 0) {
     group.add(mesh);
   }
 
-  // Under-Roadbed Embankment Skirt (Seals elevated track to the ground floor)
-  // Extends from outer edge of grass ribbon down to minTrackY
+  // Verge-to-terrain sealing skirt. The rolling terrain follows the circuit
+  // elevation, so the skirt only needs to bridge the short step from the grass
+  // ribbon edge down to the local ground, not plunge to the lap minimum.
   for (const side of ['left', 'right']) {
     const sign = side === 'left' ? 1 : -1;
     const outerDist = (vergeStart + 36.0) * sign;
@@ -442,11 +443,14 @@ export function buildTrackGrassRibbons(spline, minTrackY = 0) {
       const nx = normals[s * 3];
       const nz = normals[s * 3 + 2];
 
-      const topY = py - 2.4;
-      const botY = minTrackY - 1.2;
+      const edgeX = px + nx * outerDist;
+      const edgeZ = pz + nz * outerDist;
+      const topY = py - 2.40;
+      const groundY = terrainHeightAt(edgeX, edgeZ);
+      const botY = Math.min(topY, groundY) - 0.35;
 
-      verts.push(px + nx * outerDist, topY, pz + nz * outerDist);
-      verts.push(px + nx * outerDist, botY, pz + nz * outerDist);
+      verts.push(edgeX, topY, edgeZ);
+      verts.push(edgeX, botY, edgeZ);
     }
 
     const last = closed ? sampleCount : sampleCount - 1;
@@ -482,36 +486,116 @@ export function buildTrackGrassRibbons(spline, minTrackY = 0) {
 // ============================================================================
 
 // Terrain elevation is a single analytic function shared by the ground mesh,
-// the forest placement and the grass skirt, so every object sits on the exact
-// same surface and nothing floats or sinks.
+// the forest placement, the floodlights, the trackside props and the grass
+// skirt, so every object sits on the exact same surface and nothing floats or
+// sinks.
+//
+// The circuit is not flat (Spa spans roughly 100m of altitude), so the ground
+// cannot be a single flat sheet at the global minimum: doing that buries the
+// terrain ~30m under the high half of the lap and leaves the road on a cliff.
+// Instead the ground samples the nearest point on the track and follows its
+// elevation nearby, then blends outward into rolling hills. That keeps the
+// trackside level with the shoulder and lets the landscape rise and fall with
+// the circuit.
 let terrainContext = null;
 
 export function setTerrainContext(spline, minTrackY) {
   let cx = 0, cz = 0;
+  const trackPoints = [];
   if (spline && spline.positions && spline.sampleCount > 0) {
     for (let s = 0; s < spline.sampleCount; s++) {
-      cx += spline.positions[s * 3];
-      cz += spline.positions[s * 3 + 2];
+      const px = spline.positions[s * 3];
+      const pz = spline.positions[s * 3 + 2];
+      cx += px;
+      cz += pz;
     }
     cx /= spline.sampleCount;
     cz /= spline.sampleCount;
+
+    // Keep one point every ~64m for nearest-track queries. The full 1.5m
+    // sample set is far too dense to scan per terrain vertex.
+    const stride = Math.max(1, Math.round(64 / (spline.sampleSpacing || 1.5)));
+    for (let s = 0; s < spline.sampleCount; s += stride) {
+      trackPoints.push({
+        x: spline.positions[s * 3],
+        y: spline.positions[s * 3 + 1],
+        z: spline.positions[s * 3 + 2]
+      });
+    }
   }
-  terrainContext = { cx, cz, minTrackY };
+  terrainContext = { cx, cz, minTrackY, trackPoints };
+}
+
+// Nearest track sample for a world position, squared distance returned via out.
+const _nearest = { y: 0, distSq: Infinity };
+
+function nearestTrackAt(x, z) {
+  const ctx = terrainContext;
+  _nearest.y = ctx ? ctx.minTrackY : 0;
+  _nearest.distSq = Infinity;
+  if (!ctx || ctx.trackPoints.length === 0) return _nearest;
+
+  let bestSq = Infinity;
+  let bestY = _nearest.y;
+  const pts = ctx.trackPoints;
+  for (let i = 0; i < pts.length; i++) {
+    const dx = x - pts[i].x;
+    const dz = z - pts[i].z;
+    const sq = dx * dx + dz * dz;
+    if (sq < bestSq) {
+      bestSq = sq;
+      bestY = pts[i].y;
+    }
+  }
+  _nearest.y = bestY;
+  _nearest.distSq = bestSq;
+  return _nearest;
+}
+
+// Ground sits this far below the nearest road surface, matching how the grass
+// verge steps down from the asphalt edge.
+const SHOULDER_DROP = 1.6;
+// Fully track-following inside this radius, fully hill-driven past HILL_FAR.
+const TRACK_BLEND_NEAR = 55.0;
+const TRACK_BLEND_FAR = 620.0;
+
+function smoothstep(edge0, edge1, x) {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
 }
 
 export function terrainHeightAt(x, z) {
-  const ctx = terrainContext || { cx: 0, cz: 0, minTrackY: 0 };
-  const distToCenter = Math.hypot(x - ctx.cx, z - ctx.cz);
+  const ctx = terrainContext || { cx: 0, cz: 0, minTrackY: 0, trackPoints: [] };
+  const nearest = nearestTrackAt(x, z);
+  const dist = Math.sqrt(nearest.distSq);
+
+  // Ground that hugs the circuit: always level with the local road shoulder,
+  // never a cliff down to the lap minimum.
+  const shoulderY = nearest.y - SHOULDER_DROP;
+
+  // Rolling hills, anchored to the local shoulder so they stay continuous with
+  // the trackside ground instead of dropping to a global floor.
   const hillWave1 = Math.sin(x * 0.0028) * Math.cos(z * 0.0028) * 16.0;
   const hillWave2 = Math.sin((x + z) * 0.0055) * 8.0;
   const hillElevation = hillWave1 + hillWave2;
-  const hillFactor = Math.min(1.0, Math.max(0.0, (distToCenter - 450) / 750));
-  return ctx.minTrackY - 1.2 + hillElevation * hillFactor;
+  const hillsY = shoulderY + Math.abs(hillElevation) * 0.85;
+
+  // Blend from hugging the track to open countryside with distance.
+  const t = smoothstep(TRACK_BLEND_NEAR, TRACK_BLEND_FAR, dist);
+  const blended = shoulderY + (hillsY - shoulderY) * t;
+
+  // The lap minimum is a hard floor: the ground may never fall below the
+  // lowest point of the circuit, which is what created the sunken basin.
+  const floorY = ctx.minTrackY - SHOULDER_DROP;
+  return Math.max(blended, floorY);
 }
 
 export function buildRollingTerrain(spline, minTrackY = 0) {
   const size = 5200;
-  const segments = 84;
+  // 220 segments puts vertices roughly every 24m, dense enough for the ground
+  // to actually follow the circuit elevation near the track instead of
+  // stair-stepping across it.
+  const segments = 220;
   const geo = new THREE.PlaneGeometry(size, size, segments, segments);
   geo.rotateX(-Math.PI / 2);
 
@@ -929,7 +1013,571 @@ export function createTracksideFloodlights(scene, spline) {
 }
 
 // ============================================================================
-// 8. Master Environment Controller
+// 8. Trackside Furniture (Marshals, Barriers, Grandstands, Gantry, Boards)
+// ============================================================================
+
+// WEC marshals wear hi-vis so they are the first thing the eye finds at night.
+const MARSHAL_COLORS = [
+  [0.94, 0.55, 0.13],
+  [0.95, 0.82, 0.15],
+  [0.85, 0.22, 0.18]
+];
+
+function createFlagTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 96;
+  canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  const cell = 16;
+  for (let r = 0; r < 4; r++) {
+    for (let c = 0; c < 6; c++) {
+      ctx.fillStyle = (r + c) % 2 === 0 ? '#f4f6f8' : '#15181d';
+      ctx.fillRect(c * cell, r * cell, cell, cell);
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+function createBillboardTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 384;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+
+  ctx.fillStyle = '#0c1016';
+  ctx.fillRect(0, 0, 384, 128);
+  ctx.fillStyle = '#ff6b00';
+  ctx.fillRect(0, 110, 384, 18);
+
+  ctx.fillStyle = '#eef3f8';
+  ctx.font = '900 46px "Saira", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('TELEMETRY', 192, 54);
+  ctx.fillStyle = '#35c7f0';
+  ctx.font = '900 30px "Saira", system-ui, sans-serif';
+  ctx.fillText('HUB • ENDURANCE', 192, 92);
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+function createStartLightsTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#080a0e';
+  ctx.fillRect(0, 0, 256, 128);
+
+  const lights = [
+    [0x10, 0x10, 0x10, 0x10, 0x10],
+    [0x10, 0x18, 0x18, 0x18, 0x10],
+    [0x12, 0x1a, 0x2a, 0x1a, 0x12]
+  ];
+  for (let r = 0; r < 3; r++) {
+    for (let c = 0; c < 5; c++) {
+      ctx.fillStyle = '#1a1e24';
+      ctx.beginPath();
+      ctx.roundRect(14 + c * 48, 12 + r * 36, 34, 28, 6);
+      ctx.fill();
+      ctx.fillStyle = `rgb(120,${110 - r * 30},40)`;
+      ctx.beginPath();
+      ctx.roundRect(16 + c * 48, 14 + r * 36, 30, 24, 5);
+      ctx.fill();
+      void lights;
+    }
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+  return tex;
+}
+
+// The whole furniture set is static geometry in front of the barriers, placed
+// from the same spline and terrain function as the track and forest, so nothing
+// floats and the racing corridor stays completely clear.
+export function createTracksideProps(scene, spline, options = {}) {
+  const { cameraStands = [] } = options;
+  if (!spline || spline.sampleCount < 8) return null;
+
+  const group = new THREE.Group();
+  group.name = 'track-environment-props';
+
+  const halfWidth = spline.halfWidth || 6.0;
+  const kerbWidth = 1.35;
+  const vergeWidth = 4.0;
+  const barrierOffset = halfWidth + kerbWidth + vergeWidth + 0.9;
+  const groundY = (x, z) => terrainHeightAt(x, z);
+
+  // Keep every camera tower sightline clear, same guarantee the forests get.
+  function blocksCamera(x, z) {
+    for (const stand of cameraStands) {
+      const dx = x - stand.x;
+      const dz = z - stand.z;
+      if (dx * dx + dz * dz < 400.0) return true;
+      const p = spline.poseAtPct(stand.pct);
+      const rx = p.x - stand.x;
+      const rz = p.z - stand.z;
+      const lenSq = Math.max(1.0, rx * rx + rz * rz);
+      const t = Math.max(0.0, Math.min(1.0, (dx * rx + dz * rz) / lenSq));
+      const px = stand.x + t * rx;
+      const pz = stand.z + t * rz;
+      const ddx = x - px;
+      const ddz = z - pz;
+      if (ddx * ddx + ddz * ddz < 144.0) return true;
+    }
+    return false;
+  }
+
+  const metalMat = new THREE.MeshStandardMaterial({ color: 0x2b3542, roughness: 0.5, metalness: 0.65 });
+  const guardMat = new THREE.MeshStandardMaterial({ color: 0x9aa4ae, roughness: 0.42, metalness: 0.78 });
+  const concreteMat = new THREE.MeshStandardMaterial({ color: 0x8d9298, roughness: 0.9, metalness: 0.05 });
+  const tireMat = new THREE.MeshStandardMaterial({ color: 0x0e1013, roughness: 0.95, metalness: 0.02 });
+  const postMat = new THREE.MeshStandardMaterial({ color: 0xd8dde3, roughness: 0.7, metalness: 0.05 });
+  const skinMat = new THREE.MeshStandardMaterial({ color: 0xc98d63, roughness: 0.8, metalness: 0.02 });
+  const flagTex = createFlagTexture();
+  const flagMat = new THREE.MeshStandardMaterial({ map: flagTex, roughness: 0.85, metalness: 0.02, side: THREE.DoubleSide });
+  const lightBarMat = new THREE.MeshStandardMaterial({
+    color: 0x1b1f25,
+    emissive: 0x9fb4cc,
+    emissiveIntensity: 0.5,
+    roughness: 0.5,
+    metalness: 0.4
+  });
+  const boardTex = createBillboardTexture();
+  const boardMat = new THREE.MeshStandardMaterial({ map: boardTex, roughness: 0.6, metalness: 0.1, side: THREE.DoubleSide });
+  const boardFrameMat = new THREE.MeshStandardMaterial({ color: 0x2a3038, roughness: 0.6, metalness: 0.5 });
+  const startLightMat = new THREE.MeshStandardMaterial({
+    map: createStartLightsTexture(),
+    roughness: 0.5,
+    metalness: 0.3,
+    side: THREE.DoubleSide
+  });
+
+  // ---- 8a. Continuous concrete wall + guardrail on the outside of bends -----
+  const wallStep = Math.max(2, Math.round(spline.sampleCount / 260));
+  const wallInner = [];
+  const wallOuter = [];
+  const railLow = [];
+  const railHigh = [];
+  for (let s = 0; s < spline.sampleCount; s += wallStep) {
+    const pose = spline.poseAtPct(spline.pctAt(s));
+    for (const side of [1, -1]) {
+      const x = pose.x + pose.normalX * barrierOffset * side;
+      const z = pose.z + pose.normalZ * barrierOffset * side;
+      const terrain = groundY(x, z);
+      // Barrier top follows the road-verge line so it never dips below the
+      // racing surface. The base sinks to the terrain so no gap opens on hills.
+      const top = pose.y + 0.55;
+      const base = Math.min(terrain, top - 0.6);
+      const push = side > 0 ? wallInner : wallOuter;
+      push.push({ x, z, base, top });
+      const rail = side > 0 ? railLow : railHigh;
+      rail.push({ x, z, y: top + 0.55 });
+    }
+  }
+
+  const buildWall = (samples, name) => {
+    if (samples.length < 2) return;
+    const verts = [];
+    const indices = [];
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      verts.push(s.x, s.base, s.z, s.x, s.top, s.z);
+    }
+    const last = spline.closed ? samples.length : samples.length - 1;
+    for (let i = 0; i < last; i++) {
+      const a = i * 2;
+      const b = i * 2 + 1;
+      const c = ((i + 1) % samples.length) * 2;
+      const d = ((i + 1) % samples.length) * 2 + 1;
+      indices.push(a, b, c, b, d, c);
+      indices.push(c, b, a, c, d, b);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, concreteMat);
+    mesh.receiveShadow = true;
+    mesh.name = name;
+    group.add(mesh);
+  };
+  buildWall(wallInner, 'barrier-left');
+  buildWall(wallOuter, 'barrier-right');
+
+  const buildRail = (samples, name) => {
+    if (samples.length < 2) return;
+    const pts = samples.map((s) => new THREE.Vector3(s.x, s.y, s.z));
+    const curve = new THREE.CatmullRomCurve3(pts, spline.closed, 'catmullrom', 0.4);
+    const railGeo = new THREE.TubeGeometry(curve, pts.length * 2, 0.07, 6, spline.closed);
+    const rail = new THREE.Mesh(railGeo, guardMat);
+    rail.castShadow = true;
+    rail.name = name;
+    group.add(rail);
+  };
+  buildRail(railLow, 'guardrail-left');
+  buildRail(railHigh, 'guardrail-right');
+
+  // ---- 8b. Marshal posts, flags and distance marker poles -------------------
+  const marshalCount = 14;
+  const flagCount = 6;
+  for (let i = 0; i < marshalCount; i++) {
+    const pct = (i + 0.5) / marshalCount;
+    const pose = spline.poseAtPct(pct);
+    const side = i % 2 === 0 ? 1 : -1;
+    const offset = (barrierOffset + 4.5) * side;
+    const mx = pose.x + pose.normalX * offset;
+    const mz = pose.z + pose.normalZ * offset;
+    if (blocksCamera(mx, mz)) continue;
+    const base = groundY(mx, mz);
+
+    // Post structure
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.12, 1.8), metalMat);
+    deck.position.set(mx, base + 1.5, mz);
+    deck.rotation.y = pose.heading;
+    deck.castShadow = true;
+    group.add(deck);
+    for (const [px, pz] of [[-1.0, -0.7], [1.0, -0.7], [-1.0, 0.7], [1.0, 0.7]]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.5, 0.1), metalMat);
+      leg.position.set(mx + px * Math.cos(pose.heading) - pz * Math.sin(pose.heading),
+        base + 0.75,
+        mz + px * Math.sin(pose.heading) + pz * Math.cos(pose.heading));
+      group.add(leg);
+    }
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.07, 0.07), guardMat);
+    rail.position.set(mx, base + 2.1, mz);
+    rail.rotation.y = pose.heading;
+    group.add(rail);
+
+    // Floodlight bar on top of the rail, bright at night.
+    const lamp = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.16, 0.3), lightBarMat);
+    lamp.position.set(mx, base + 2.42, mz);
+    lamp.rotation.y = pose.heading;
+    group.add(lamp);
+
+    // Marshal figure in hi-vis
+    const tone = MARSHAL_COLORS[i % MARSHAL_COLORS.length];
+    const vestMat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(tone[0], tone[1], tone[2]),
+      roughness: 0.7,
+      metalness: 0.02
+    });
+    const fwd = pose.heading;
+    const figureX = mx - pose.normalX * 0.6 * side;
+    const figureZ = mz - pose.normalZ * 0.6 * side;
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.2, 0.62, 8), vestMat);
+    torso.position.set(figureX, base + 1.85, figureZ);
+    torso.castShadow = true;
+    group.add(torso);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), skinMat);
+    head.position.set(figureX, base + 2.28, figureZ);
+    group.add(head);
+    const lid = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.13, 0.06, 10), vestMat);
+    lid.position.set(figureX, base + 2.38, figureZ);
+    group.add(lid);
+
+    // A couple of marshals wave a flag
+    if (i % 3 === 0 && i < flagCount * 3) {
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 1.4, 6), postMat);
+      pole.position.set(figureX, base + 2.5, figureZ);
+      pole.rotation.z = 0.4;
+      group.add(pole);
+      const flag = new THREE.Mesh(new THREE.PlaneGeometry(0.72, 0.48), flagMat);
+      flag.position.set(figureX + 0.42, base + 3.0, figureZ);
+      flag.rotation.y = fwd + 0.5;
+      group.add(flag);
+    }
+
+    // Marshal post number plate facing the track
+    if (i % 2 === 0) {
+      const sign = new THREE.Mesh(new THREE.PlaneGeometry(0.6, 0.4), postMat);
+      const towardTrack = -side;
+      sign.position.set(
+        mx + pose.normalX * 1.35 * towardTrack,
+        base + 1.9,
+        mz + pose.normalZ * 1.35 * towardTrack
+      );
+      sign.rotation.y = fwd + Math.PI / 2;
+      group.add(sign);
+    }
+  }
+
+  // Marker / braking boards on the approach to corners, plus light poles.
+  for (let i = 0; i < 22; i++) {
+    const pct = (i + 0.5) / 22;
+    const pose = spline.poseAtPct(pct);
+    const side = i % 2 === 0 ? 1 : -1;
+    const offset = (barrierOffset + 1.6) * side;
+    const x = pose.x + pose.normalX * offset;
+    const z = pose.z + pose.normalZ * offset;
+    const base = groundY(x, z);
+
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 2.6, 6), postMat);
+    pole.position.set(x, base + 1.3, z);
+    group.add(pole);
+
+    const board = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.5), postMat);
+    board.position.set(x, base + 2.2, z);
+    board.rotation.y = pose.heading + Math.PI / 2;
+    group.add(board);
+  }
+
+  // ---- 8c. Tire stacks at corner entries ------------------------------------
+  const tireGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.22, 12);
+  const { curvature, sampleCount } = spline;
+  const tireDummy = new THREE.Object3D();
+  const tireSpots = [];
+  const tireMatrices = [];
+  for (let s = 0; s < sampleCount; s += 4) {
+    if (Math.abs(curvature[s]) < 0.006) continue;
+    const pose = spline.poseAtPct(spline.pctAt(s));
+    const side = curvature[s] >= 0 ? -1 : 1;
+    const offset = (barrierOffset + 1.4) * side;
+    const x = pose.x + pose.normalX * offset;
+    const z = pose.z + pose.normalZ * offset;
+    if (blocksCamera(x, z)) continue;
+    if (tireSpots.some((t) => Math.hypot(t.x - x, t.z - z) < 14)) continue;
+    tireSpots.push({ x, z });
+
+    const base = groundY(x, z);
+    const stack = 3 + Math.floor(Math.random() * 2);
+    for (let t = 0; t < stack; t++) {
+      tireDummy.position.set(x, base + 0.11 + t * 0.22, z);
+      tireDummy.rotation.set(0, Math.random() * Math.PI, 0);
+      tireDummy.updateMatrix();
+      tireMatrices.push(tireDummy.matrix.clone());
+    }
+  }
+  if (tireMatrices.length > 0) {
+    const tires = new THREE.InstancedMesh(tireGeo, tireMat, tireMatrices.length);
+    tires.castShadow = true;
+    tires.receiveShadow = true;
+    tireMatrices.forEach((m, i) => tires.setMatrixAt(i, m));
+    tires.instanceMatrix.needsUpdate = true;
+    group.add(tires);
+  }
+
+  // ---- 8d. Grandstands along the straights --------------------------------
+  const standCount = 6;
+  const standSections = [];
+  for (let i = 0; i < standCount; i++) {
+    const pct = (i + 0.5) / standCount;
+    const pose = spline.poseAtPct(pct);
+    const side = i % 2 === 0 ? 1 : -1;
+    const offset = (barrierOffset + 24.0) * side;
+    const cx = pose.x + pose.normalX * offset;
+    const cz = pose.z + pose.normalZ * offset;
+    if (blocksCamera(cx, cz)) continue;
+    const base = groundY(cx, cz);
+    standSections.push({ cx, cz, base, heading: pose.heading, pose });
+  }
+
+  if (standSections.length > 0) {
+    // Seating deck + stepped rows, built once per stand but sharing materials.
+    for (const stand of standSections) {
+      const rows = 8;
+      const width = 46;
+      const rowDepth = 1.15;
+      const rowRise = 0.42;
+      const standGroup = new THREE.Group();
+      standGroup.position.set(stand.cx, stand.base, stand.cz);
+      standGroup.rotation.y = stand.heading;
+
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(width, 0.5, rows * rowDepth), concreteMat);
+      deck.position.set(0, 0.25, -(rows * rowDepth) / 2);
+      deck.receiveShadow = true;
+      standGroup.add(deck);
+
+      for (let r = 0; r < rows; r++) {
+        const rowGeo = new THREE.BoxGeometry(width, rowRise, rowDepth * 0.86);
+        const row = new THREE.Mesh(rowGeo, concreteMat);
+        row.position.set(0, 0.5 + r * rowRise + rowRise / 2, -r * rowDepth - rowDepth * 0.5);
+        row.receiveShadow = true;
+        standGroup.add(row);
+
+        if (r % 2 === 0) {
+          const seats = new THREE.Mesh(new THREE.BoxGeometry(width - 1.2, 0.16, rowDepth * 0.5), metalMat);
+          seats.position.set(0, 0.5 + r * rowRise + rowRise + 0.08, -r * rowDepth - rowDepth * 0.4);
+          standGroup.add(seats);
+        }
+      }
+
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(width + 2, 0.3, rows * rowDepth + 2), guardMat);
+      roof.position.set(0, 0.5 + rows * rowRise + 3.6, -(rows * rowDepth) / 2);
+      roof.rotation.x = -0.16;
+      roof.castShadow = true;
+      standGroup.add(roof);
+
+      for (const sx of [-1, 1]) {
+        for (const sz of [1, -1]) {
+          const pier = new THREE.Mesh(new THREE.BoxGeometry(0.35, rows * rowRise + 3.6, 0.35), metalMat);
+          pier.position.set(sx * (width / 2 - 0.6), (rows * rowRise + 3.6) / 2, sz * (rows * rowDepth) / 2 - rowDepth * 0.5);
+          pier.castShadow = true;
+          standGroup.add(pier);
+        }
+      }
+
+      // Crowd blocks: instanced, low-poly, muted palette.
+      const crowdGeo = new THREE.BoxGeometry(0.42, 0.72, 0.34);
+      const crowdMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0.02 });
+      const crowdCount = rows * 46 * 0.55 | 0;
+      const crowd = new THREE.InstancedMesh(crowdGeo, crowdMat, crowdCount);
+      const dummy = new THREE.Object3D();
+      const color = new THREE.Color();
+      const palette = [0x2c3e50, 0x7f8c8d, 0xc0392b, 0x2980b9, 0xd35400, 0x8e44ad, 0x27ae60, 0x95a5a6, 0xecf0f1, 0x34495e];
+      let idx = 0;
+      for (let r = 0; r < rows && idx < crowdCount; r++) {
+        for (let c = 0; c < width - 1 && idx < crowdCount; c++) {
+          if (Math.random() > 0.55) continue;
+          const px = -width / 2 + 0.6 + c;
+          const pz = -r * rowDepth - rowDepth * 0.5;
+          dummy.position.set(px, 0.5 + r * rowRise + rowRise + 0.36, pz);
+          dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
+          dummy.scale.set(1, 0.9 + Math.random() * 0.25, 1);
+          dummy.updateMatrix();
+          crowd.setMatrixAt(idx, dummy.matrix);
+          color.setHex(palette[(Math.random() * palette.length) | 0]);
+          color.multiplyScalar(0.8 + Math.random() * 0.35);
+          crowd.setColorAt(idx, color);
+          idx++;
+        }
+      }
+      crowd.count = idx;
+      crowd.instanceMatrix.needsUpdate = true;
+      if (crowd.instanceColor) crowd.instanceColor.needsUpdate = true;
+      standGroup.add(crowd);
+
+      group.add(standGroup);
+    }
+  }
+
+  // ---- 8e. Start/finish gantry with lights --------------------------------
+  {
+    const pose = spline.poseAtPct(0.0);
+    const span = barrierOffset + 3.0;
+    const gantryGroup = new THREE.Group();
+    gantryGroup.position.set(pose.x, 0, pose.z);
+    gantryGroup.rotation.y = pose.heading;
+
+    const towerH = 9.6;
+    const beamY = 9.0;
+    for (const sx of [-1, 1]) {
+      const wx = pose.x + pose.normalX * span * sx;
+      const wz = pose.z + pose.normalZ * span * sx;
+      const base = groundY(wx, wz);
+      // Tower is placed in the rotated group frame, so only its height varies.
+      const tower = new THREE.Mesh(new THREE.BoxGeometry(0.7, towerH, 0.7), metalMat);
+      tower.position.set(sx * span, base + towerH / 2, 0);
+      tower.castShadow = true;
+      gantryGroup.add(tower);
+    }
+
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(span * 2 + 1.4, 1.1, 1.1), metalMat);
+    beam.position.set(0, beamY, 0);
+    beam.castShadow = true;
+    gantryGroup.add(beam);
+
+    const lightPanel = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 1.6), startLightMat);
+    lightPanel.position.set(0, beamY - 1.3, 0.58);
+    gantryGroup.add(lightPanel);
+
+    const banner = new THREE.Mesh(new THREE.PlaneGeometry(span * 1.7, 1.0), boardMat);
+    banner.position.set(0, beamY + 0.9, 0.0);
+    banner.rotation.y = Math.PI;
+    gantryGroup.add(banner);
+
+    group.add(gantryGroup);
+  }
+
+  // ---- 8f. Advertising boards on the straights -----------------------------
+  const boardCount = 10;
+  for (let i = 0; i < boardCount; i++) {
+    const pct = (i + 0.35) / boardCount;
+    const pose = spline.poseAtPct(pct);
+    const side = i % 2 === 0 ? 1 : -1;
+    const offset = (barrierOffset + 2.6) * side;
+    const x = pose.x + pose.normalX * offset;
+    const z = pose.z + pose.normalZ * offset;
+    if (blocksCamera(x, z)) continue;
+    const base = groundY(x, z);
+    const board = new THREE.Mesh(new THREE.PlaneGeometry(7.0, 2.4), boardMat);
+    board.position.set(x, base + 1.6, z);
+    board.rotation.y = pose.heading + Math.PI / 2 + (side > 0 ? 0 : Math.PI);
+    group.add(board);
+
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(7.2, 2.6, 0.12), boardFrameMat);
+    frame.position.set(x - pose.normalX * 0.12 * side, base + 1.6, z - pose.normalZ * 0.12 * side);
+    frame.rotation.y = board.rotation.y;
+    group.add(frame);
+  }
+
+  // ---- 8g. Overhead track bridge -------------------------------------------
+  {
+    const bridgePct = 0.82;
+    const pose = spline.poseAtPct(bridgePct);
+    const ahead = spline.poseAtPct(Math.min(1.0, bridgePct + 4.0 / spline.totalLength));
+    const dx = ahead.x - pose.x;
+    const dz = ahead.z - pose.z;
+    const dlen = Math.hypot(dx, dz) || 1;
+    const heading = Math.atan2(dx / dlen, dz / dlen);
+    const span = halfWidth + 9.0;
+    const bridge = new THREE.Group();
+    const baseY = pose.y || 0;
+    bridge.position.set(pose.x, baseY, pose.z);
+    bridge.rotation.y = heading;
+
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(span * 2, 1.2, 9.0), concreteMat);
+    deck.position.set(0, 7.2, 0);
+    deck.castShadow = true;
+    bridge.add(deck);
+
+    const parapetMat = new THREE.MeshStandardMaterial({ color: 0xb7bcc2, roughness: 0.85, metalness: 0.05 });
+    for (const sx of [-1, 1]) {
+      const parapet = new THREE.Mesh(new THREE.BoxGeometry(span * 2, 0.9, 0.3), parapetMat);
+      parapet.position.set(0, 8.2, sx * 4.3);
+      bridge.add(parapet);
+    }
+
+    for (const sx of [-1, 1]) {
+      const px = sx * (halfWidth + 3.2);
+      const pier = new THREE.Mesh(new THREE.BoxGeometry(1.8, 7.4, 2.4), concreteMat);
+      pier.position.set(px, 3.6, 0);
+      pier.castShadow = true;
+      bridge.add(pier);
+    }
+
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(span * 1.6, 1.4), boardMat);
+    sign.position.set(0, 6.1, 4.1);
+    bridge.add(sign);
+
+    group.add(bridge);
+  }
+
+  scene.add(group);
+
+  return {
+    group,
+    setMode(mode) {
+      // Floodlight bars on the marshal posts read brightest at night.
+      lightBarMat.emissiveIntensity = mode === 'night' ? 1.1 : mode === 'sunset' ? 0.7 : 0.25;
+    },
+    dispose: () => {
+      scene.remove(group);
+      group.traverse((obj) => {
+        if (obj.isMesh || obj.isInstancedMesh) {
+          if (obj.geometry) obj.geometry.dispose();
+        }
+      });
+    }
+  };
+}
+
+// ============================================================================
+// 9. Master Environment Controller
 // ============================================================================
 
 export function createTrackEnvironment(scene, spline, options = {}) {
@@ -938,23 +1586,30 @@ export function createTrackEnvironment(scene, spline, options = {}) {
   // 1. Atmospheric Sky Dome
   const skyDome = createSkyDome(scene, initialLightingMode);
 
-  // 2. Grass Verges & Under-Road Skirt
+  // 2. Seed the shared terrain height field first: the grass skirt, the ground
+  //    mesh, the forest, the floodlights and the trackside props all sample the
+  //    same function, so it must be ready before any of them are built.
+  setTerrainContext(spline, minTrackY);
+
+  // 3. Grass Verges & Under-Road Skirt (skirt seals to the local terrain)
   const grassGroup = buildTrackGrassRibbons(spline, minTrackY);
   if (grassGroup) scene.add(grassGroup);
 
-  // 3. Rolling Countryside Terrain. This also seeds the shared terrain height
-  //    function used by the forest, so trees always sit on the ground.
-  setTerrainContext(spline, minTrackY);
+  // 4. Rolling Countryside Terrain (follows the circuit elevation nearby)
   const terrainMesh = buildRollingTerrain(spline, minTrackY);
   if (terrainMesh) scene.add(terrainMesh);
 
-  // 4. Instanced 3D Forests (Pines & Oaks with TV Camera Sightline Clearances)
+  // 5. Instanced 3D Forests (Pines & Oaks with TV Camera Sightline Clearances)
   const forestGroup = createTracksideForest(spline, minTrackY, cameraStands);
   if (forestGroup) scene.add(forestGroup);
 
-  // 5. Trackside Floodlight Masts (night visibility landmarks)
+  // 6. Trackside Floodlight Masts (night visibility landmarks)
   const floodlights = createTracksideFloodlights(scene, spline);
   if (floodlights) floodlights.setMode(initialLightingMode);
+
+  // 7. Trackside Furniture: barriers, marshal posts, grandstands, gantry, boards
+  const props = createTracksideProps(scene, spline, { minTrackY, cameraStands });
+  if (props) props.setMode(initialLightingMode);
 
   return {
     skyDome,
@@ -962,9 +1617,11 @@ export function createTrackEnvironment(scene, spline, options = {}) {
     terrainMesh,
     forestGroup,
     floodlights,
+    props,
     setLightingMode: (mode) => {
       skyDome.setMode(mode);
       if (floodlights) floodlights.setMode(mode);
+      if (props) props.setMode(mode);
     },
     update: (dt) => {
       skyDome.update(dt);
@@ -975,6 +1632,7 @@ export function createTrackEnvironment(scene, spline, options = {}) {
       if (terrainMesh) scene.remove(terrainMesh);
       if (forestGroup) scene.remove(forestGroup);
       if (floodlights) floodlights.dispose();
+      if (props) props.dispose();
     }
   };
 }
