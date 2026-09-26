@@ -45,6 +45,67 @@ Arah visual dan aturan UI ada di [`DESIGN.md`](DESIGN.md): mood *engineering pit
 
 ---
 
+## Alur Kerja Harian & Deploy VPS
+
+Setup produksi saat ini berjalan di VPS `43.134.175.87` memakai **systemd** (bukan Docker),
+folder aplikasi `/home/ubuntu/telemetry-hub`, dan backend uvicorn di port **8099**.
+Frontend di-serve sebagai SPA dari `frontend/dist` (lihat `FRONTEND_DIST` di unit service).
+
+### Ringkasan alur
+
+```
+1. Ngoding          (edit file di folder project ini)
+2. git add -A
+3. git commit -m "pesan perubahan"
+4. git push
+5. Deploy ke VPS    (lihat di bawah)
+6. Buka http://43.134.175.87:8099/ lalu hard refresh (Ctrl+F5)
+```
+
+### Langkah 5: Deploy ke VPS
+
+Cara termudah, cukup jalankan satu perintah dari komputer lokal:
+
+```bash
+ssh ubuntu@43.134.175.87 "bash ~/vps-build.sh"
+```
+
+Script `~/vps-build.sh` di VPS melakukan semuanya secara otomatis:
+
+1. `git fetch origin main` + `git reset --hard origin/main` di `/home/ubuntu/telemetry-hub`.
+   File yang tidak terlacak seperti `backend/storage/`, `backend/telemetry.db`, `.env`, dan
+   `backend/venv/` **tidak tersentuh** karena ada di `.gitignore`.
+2. Build frontend dengan Node 20 (via nvm): `rm -rf node_modules dist && npm install && npm run build`.
+3. Update dependency backend: `./venv/bin/pip install -r requirements.txt`.
+4. `sudo systemctl restart telemetry-hub`, lalu verifikasi port `8099` mendengarkan.
+
+Jika script belum ada di VPS, isinya seperti ini:
+
+```bash
+#!/usr/bin/env bash
+set -e
+export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; nvm use 20 >/dev/null
+APP=/home/ubuntu/telemetry-hub
+cd "$APP" && git fetch origin main && git reset --hard origin/main
+cd "$APP/frontend" && rm -rf node_modules dist && npm install && npm run build
+cd "$APP/backend" && ./venv/bin/pip install -q -r requirements.txt
+sudo systemctl restart telemetry-hub
+sleep 2 && systemctl is-active telemetry-hub && sudo ss -ltnp | grep 8099
+```
+
+### Catatan penting
+
+- **Node wajib v20+ di VPS.** Vite 8 tidak jalan di Node v12. Node 20 sudah tersedia lewat
+  nvm (`. "$NVM_DIR/nvm.sh"; nvm use 20`), jadi script harus memuat nvm dulu.
+- **Bukan Docker.** Container Docker yang ada di VPS itu project lain (prefix `simak_`).
+  Jangan menyentuhnya.
+- **Cek cepat setelah deploy:** `curl -s http://43.134.175.87:8099/ | grep -o 'assets/index-[^"]*\.js'`
+  harus menampilkan nama bundle baru (hash berubah setiap build).
+- **Rollback:** `cd /home/ubuntu/telemetry-hub && git reset --hard <commit-lama>` lalu ulangi
+  langkah build + restart.
+
+---
+
 ## Struktur Direktori
 
 ```
