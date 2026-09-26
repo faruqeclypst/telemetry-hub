@@ -5,6 +5,7 @@ from fastapi.staticfiles import StaticFiles
 import io
 import csv
 import os
+import shutil
 import logging
 from typing import Optional, List, Dict, Any
 
@@ -305,7 +306,6 @@ async def upload_duckdb_session(file: UploadFile = File(...)):
     if not file.filename.endswith(".duckdb"):
         raise HTTPException(status_code=400, detail="Only .duckdb files are supported")
 
-    import shutil
     storage_dir = os.environ.get("STORAGE_DIR", os.path.join(os.path.dirname(__file__), "storage"))
     upload_dir = os.path.join(storage_dir, "uploads")
     os.makedirs(upload_dir, exist_ok=True)
@@ -321,6 +321,61 @@ async def upload_duckdb_session(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Failed to parse uploaded duckdb file: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/sessions/ingest")
+async def ingest_recording(
+    file: UploadFile = File(...),
+    api_key: Optional[str] = Form(None)
+):
+    """Auto-ingest endpoint for the desktop watcher.
+
+    Accepts a recording dropped by an LMU/SimHub watcher and imports it, so a
+    finished session lands in the web app with no manual step. Routing is by
+    extension: .duckdb goes through the LMU DuckDB parser, anything else is
+    treated as an RXTM binary (.telemetry / .rxtm).
+
+    The shared key is optional: if INGEST_API_KEY is set in the environment the
+    request must match it, otherwise the endpoint stays open for local use.
+    """
+    expected_key = os.environ.get("INGEST_API_KEY")
+    if expected_key and api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    filename = file.filename or "recording"
+    storage_dir = os.environ.get("STORAGE_DIR", os.path.join(os.path.dirname(__file__), "storage"))
+    inbox_dir = os.path.join(storage_dir, "inbox")
+    os.makedirs(inbox_dir, exist_ok=True)
+
+    safe_name = os.path.basename(filename)
+    temp_path = os.path.join(inbox_dir, safe_name)
+    with open(temp_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    try:
+        if safe_name.lower().endswith(".duckdb"):
+            from lmu_duckdb_parser import LMUDuckDBParser
+            res = LMUDuckDBParser.parse_and_import(temp_path)
+        else:
+            raise HTTPException(
+                status_code=415,
+                detail="Only LMU .duckdb recordings are accepted by the watcher. "
+                       "Enable LMU native telemetry recording (UserData/Telemetry)."
+            )
+        logger.info("Auto-ingested %s", safe_name)
+        return {"success": True, "filename": safe_name, **(res if isinstance(res, dict) else {})}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Auto-ingest failed for %s: %s", safe_name, e)
+        raise HTTPException(status_code=500, detail=f"Failed to import {safe_name}: {str(e)}")
+    finally:
+        # The recording lives in the database now; keep the inbox clean.
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+
 
 @app.get("/api/sessions/{session_id}/laps/{lap_num}/export/csv")
 def export_lap_csv(session_id: str, lap_num: int):
