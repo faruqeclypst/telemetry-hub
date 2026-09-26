@@ -155,6 +155,14 @@ export function getTrackElevation(trackName, distPct, sample = null) {
     ? interpolateKeypoints(TRACK_ELEVATION_DATABASE[circuitKey], distPct)
     : null;
 
+  // The database is authored with the intuitive sign: positive camber means the
+  // racing surface rises toward the OUTSIDE of the corner (true banking, as at
+  // Daytona). The 3D road ribbon measures lateral offset along the spline
+  // normal, which points to the car's LEFT, so a positive value there would
+  // raise the inside instead. Flip the sign once here, at the boundary, so the
+  // road geometry, the kerbs, the verge and the car body all bank the right way.
+  const toGeometrySign = (camber) => -camber;
+
   // A measured in-game altitude overrides the circuit's elevation profile, but
   // it must NOT wipe the banking: banking is a property of the circuit, not of
   // the sample. Keeping camber from the database is what lets a banked oval
@@ -162,11 +170,13 @@ export function getTrackElevation(trackName, distPct, sample = null) {
   if (sample && (sample.world_z != null || sample.elevation != null)) {
     const rawElev = sample.world_z != null ? sample.world_z : sample.elevation;
     if (Number.isFinite(rawElev)) {
-      return { elevation: rawElev, camber: known ? known.camber : 0 };
+      return { elevation: rawElev, camber: toGeometrySign(known ? known.camber : 0) };
     }
   }
 
-  if (known) return known;
+  if (known) {
+    return { elevation: known.elevation, camber: toGeometrySign(known.camber) };
+  }
 
   // Realistic natural multi-harmonic elevation fallback for unlisted tracks
   const u = ((distPct % 1.0) + 1.0) % 1.0;
@@ -179,5 +189,5 @@ export function getTrackElevation(trackName, distPct, sample = null) {
   // Subtle natural camber on high-speed sweeps
   const camber = 0.02 * Math.sin(twoPi * 2 * u);
 
-  return { elevation: Math.max(0, elev + 8.0), camber };
+  return { elevation: Math.max(0, elev + 8.0), camber: toGeometrySign(camber) };
 }
