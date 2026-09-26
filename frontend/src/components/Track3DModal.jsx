@@ -147,13 +147,6 @@ export default function Track3DModal({
   useEffect(() => { hiddenDeltaTagRef.current = !showDeltaTag; }, [showDeltaTag]);
   useEffect(() => { activeCornerRef.current = activeCornerId; }, [activeCornerId]);
   useEffect(() => {
-    multiLapActiveRef.current = multiLapActive;
-    multiLapDurationRef.current = multiLapDuration;
-    lapDurationRef.current = lapDuration;
-    sampleAtSessionTimeRef.current = sampleAtSessionTime;
-    lapMarksRef.current = lapMarks;
-  }, [multiLapActive, multiLapDuration, lapDuration, sampleAtSessionTime, lapMarks]);
-  useEffect(() => {
     activeCarRef.current = activeCar;
     isChaseCamInitRef.current = false;
     chaseCamHeadingRef.current = null;
@@ -339,6 +332,17 @@ export default function Track3DModal({
       lap_number: s0.lap_number
     };
   }, [sessionSamples]);
+
+  // Mirror the multi-lap values into refs for the animation loop. This must sit
+  // after the declarations above, because the dependency array is evaluated
+  // during render and would otherwise hit a temporal-dead-zone error.
+  useEffect(() => {
+    multiLapActiveRef.current = multiLapActive;
+    multiLapDurationRef.current = multiLapDuration;
+    lapDurationRef.current = lapDuration;
+    sampleAtSessionTimeRef.current = sampleAtSessionTime;
+    lapMarksRef.current = lapMarks;
+  }, [multiLapActive, multiLapDuration, lapDuration, sampleAtSessionTime, lapMarks]);
 
   // --------------------------------------------------------------------------
   // 1. Precalculate Smooth Continuous Track Spline & Unwrapped Headings
