@@ -611,22 +611,6 @@ export default function TelemetryChart({
         ctx.strokeStyle = CHART.speed;
         ctx.lineWidth = 2.1;
         ctx.stroke();
-
-        if (isComp) {
-          const compList = compareData.comparison;
-          ctx.beginPath();
-          compList.forEach((pt, i) => {
-            const x = getX(i, compList.length);
-            const y = getY(pt.comp?.speed || 0, channel.min, channel.max, top, chH);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = CHART.speed;
-          ctx.lineWidth = 1.7;
-          ctx.setLineDash([5, 3]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
       }
 
       if (channel.id === 'pedals') {
@@ -651,38 +635,6 @@ export default function TelemetryChart({
         ctx.strokeStyle = CHART.brake;
         ctx.lineWidth = 1.9;
         ctx.stroke();
-
-        // Ghost Car Pedals (Same colors, dashed lines)
-        if (isComp) {
-          const compList = compareData.comparison;
-          // Ghost Throttle (Dashed)
-          ctx.beginPath();
-          compList.forEach((pt, i) => {
-            const x = getX(i, compList.length);
-            const y = getY(pt.comp?.throttle || 0, channel.min, channel.max, top, chH);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = CHART.throttle;
-          ctx.lineWidth = 1.7;
-          ctx.setLineDash([5, 3]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-
-          // Ghost Brake (Dashed)
-          ctx.beginPath();
-          compList.forEach((pt, i) => {
-            const x = getX(i, compList.length);
-            const y = getY(pt.comp?.brake || 0, channel.min, channel.max, top, chH);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = CHART.brake;
-          ctx.lineWidth = 1.7;
-          ctx.setLineDash([5, 3]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
       }
 
       if (channel.id === 'rpm') {
@@ -696,23 +648,6 @@ export default function TelemetryChart({
         ctx.strokeStyle = CHART.rpm;
         ctx.lineWidth = 1.9;
         ctx.stroke();
-
-        // Ghost Car RPM (Same color, dashed lines)
-        if (isComp) {
-          const compList = compareData.comparison;
-          ctx.beginPath();
-          compList.forEach((pt, i) => {
-            const x = getX(i, compList.length);
-            const y = getY(pt.comp?.rpm || 0, channel.min, channel.max, top, chH);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = CHART.rpm;
-          ctx.lineWidth = 1.7;
-          ctx.setLineDash([5, 3]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
 
         let lastGear = samples[0]?.gear;
         let lastShiftX = -100;
@@ -758,39 +693,6 @@ export default function TelemetryChart({
         ctx.strokeStyle = CHART.gforce;
         ctx.lineWidth = 1.7;
         ctx.stroke();
-
-        // Ghost Car Steering & Lateral G (Same colors, dashed lines)
-        if (isComp) {
-          const compList = compareData.comparison;
-          // Ghost Steering (Dashed)
-          ctx.beginPath();
-          compList.forEach((pt, i) => {
-            const x = getX(i, compList.length);
-            const steerVal = (pt.comp?.steering || 0) / 30.0;
-            const y = getY(steerVal, channel.min, channel.max, top, chH);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = CHART.steer;
-          ctx.lineWidth = 1.5;
-          ctx.setLineDash([5, 3]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-
-          // Ghost Lateral G (Dashed)
-          ctx.beginPath();
-          compList.forEach((pt, i) => {
-            const x = getX(i, compList.length);
-            const y = getY(pt.comp?.lat_g || 0, channel.min, channel.max, top, chH);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = CHART.gforce;
-          ctx.lineWidth = 1.7;
-          ctx.setLineDash([5, 3]);
-          ctx.stroke();
-          ctx.setLineDash([]);
-        }
       }
 
       ctx.restore();
@@ -1314,19 +1216,11 @@ export default function TelemetryChart({
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--text-bright)', fontWeight: 600 }}>
                   <span style={{ width: 14, height: 2.5, background: 'var(--text-bright)', borderRadius: 1 }} />
-                  Garis Solid = Active (L{refLapNumber})
+                  Active (L{refLapNumber})
                 </span>
                 <span style={{ color: 'var(--border-dim)' }}>|</span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, color: 'var(--text-dim)', fontWeight: 600 }}>
-                  <span
-                    style={{
-                      width: 14,
-                      height: 2.5,
-                      background: 'repeating-linear-gradient(90deg, var(--text-bright), var(--text-bright) 4px, transparent 4px, transparent 7px)',
-                      borderRadius: 1
-                    }}
-                  />
-                  Garis Putus-Putus = Ghost (L{compLapNumber})
+                  Ghost L{compLapNumber} di panel Head to head
                 </span>
               </div>
             )}

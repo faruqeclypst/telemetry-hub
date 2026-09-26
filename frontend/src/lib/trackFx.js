@@ -52,7 +52,12 @@ export function createDeltaTagSprite() {
       // Position floating above the ghost car
       sprite.position.set(ghostPose.x, (ghostPose.y || 0) + 2.2, ghostPose.z);
 
-      const sign = deltaSec <= 0 ? '−' : '+';
+      // deltaSec is the driver's elapsed time minus the ghost's at the same
+      // track position (t_ref - t_comp). Positive means the driver took longer,
+      // so the ghost is ahead and the driver is losing time: show "+".
+      // Negative means the driver is ahead and the ghost is behind: show "−".
+      const ghostAhead = deltaSec > 0;
+      const sign = ghostAhead ? '+' : '−';
       const absDelta = Math.abs(deltaSec).toFixed(2);
       const absDist = Math.abs(deltaMeters || 0).toFixed(1);
       const textKey = `${sign}${absDelta}_${absDist}`;
@@ -60,9 +65,9 @@ export function createDeltaTagSprite() {
       if (textKey === lastText) return;
       lastText = textKey;
 
-      const isAhead = deltaSec <= 0;
-      const primaryColor = isAhead ? '#3fd68c' : '#ff5c5c';
-      const labelText = isAhead ? `GHOST AHEAD ${sign}${absDelta}s` : `GHOST BEHIND ${sign}${absDelta}s`;
+      // Red when the ghost is ahead (driver losing), green when the ghost is behind.
+      const primaryColor = ghostAhead ? '#ff5c5c' : '#3fd68c';
+      const labelText = ghostAhead ? `GHOST AHEAD ${sign}${absDelta}s` : `GHOST BEHIND ${sign}${absDelta}s`;
 
       ctx.clearRect(0, 0, 512, 160);
 
