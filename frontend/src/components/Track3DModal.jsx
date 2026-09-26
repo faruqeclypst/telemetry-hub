@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { X, Play, Pause, RotateCcw, ZoomIn, ZoomOut, Zap, Sun, Moon, Sunset, Volume2, VolumeX, Video, Activity, Gauge, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, Play, Pause, RotateCcw, ZoomIn, ZoomOut, Zap, Sun, Moon, Sunset, Volume2, VolumeX, Video, Activity, Gauge, Diff, ChevronDown, ChevronUp } from 'lucide-react';
 import {
   buildSplineFromSamples,
   buildRoadRibbon,
@@ -66,6 +66,11 @@ export default function Track3DModal({
   // live numbers stay visible when the panel is hidden or the screen is narrow.
   const [showTelemetryOverlay, setShowTelemetryOverlay] = useState(true);
 
+  // Floating +/− delta tag above the cars. Can be hidden independently of the
+  // rest of the HUD.
+  const [showDeltaTag, setShowDeltaTag] = useState(true);
+  const hiddenDeltaTagRef = useRef(false);
+
   // Chase Camera Smoothing Refs (Zero-Jitter critically damped crane)
   const chasePosRef = useRef(new THREE.Vector3());
   const chaseLookTargetRef = useRef(new THREE.Vector3());
@@ -126,6 +131,7 @@ export default function Track3DModal({
   useEffect(() => { lightingModeRef.current = lightingMode; }, [lightingMode]);
   useEffect(() => { minimapModeRef.current = minimapMode; }, [minimapMode]);
   useEffect(() => { zoomLevelRef.current = zoomLevel; }, [zoomLevel]);
+  useEffect(() => { hiddenDeltaTagRef.current = !showDeltaTag; }, [showDeltaTag]);
   useEffect(() => { activeCornerRef.current = activeCornerId; }, [activeCornerId]);
   useEffect(() => {
     activeCarRef.current = activeCar;
@@ -681,6 +687,7 @@ export default function Track3DModal({
 
         const carSplinePose = spline ? spline.poseAtPct(p.dist_pct || 0) : null;
         const roadPitch = carSplinePose ? carSplinePose.pitch : 0;
+        const roadCamber = carSplinePose ? (carSplinePose.camber || 0) : 0;
         const carY = carPose.elevation != null ? carPose.elevation : (carSplinePose ? carSplinePose.y : 0);
 
         let travelHeading = carPose.heading;
@@ -710,7 +717,10 @@ export default function Track3DModal({
         carHeading = attitude.heading;
 
         carRef.current.position.set(carX, carY + CAR_RIDE_HEIGHT, carZ);
-        carRef.current.rotation.set(attitude.pitch + roadPitch, carHeading, attitude.roll, 'YXZ');
+        // Roll = body lean from lateral G + the road's own cross-slope, so the
+        // car banks with a banked oval instead of sitting flat on a tilted
+        // surface.
+        carRef.current.rotation.set(attitude.pitch + roadPitch, carHeading, attitude.roll + roadCamber, 'YXZ');
       }
 
       // 2. Smoothly interpolate ghost car position (track-relative, same centerline)
@@ -736,6 +746,7 @@ export default function Track3DModal({
 
           const ghostSplinePose = spline ? spline.poseAtPct(ghostP.dist_pct || 0) : null;
           const ghostRoadPitch = ghostSplinePose ? ghostSplinePose.pitch : 0;
+          const ghostRoadCamber = ghostSplinePose ? (ghostSplinePose.camber || 0) : 0;
           const ghostY = ghostPose.elevation != null ? ghostPose.elevation : (ghostSplinePose ? ghostSplinePose.y : 0);
 
           let travelHeading = ghostPose.heading;
@@ -770,7 +781,7 @@ export default function Track3DModal({
           ghostCarRef.current.rotation.set(
             ghostAttitude.pitch + ghostRoadPitch,
             ghostAttitude.heading,
-            ghostAttitude.roll,
+            ghostAttitude.roll + ghostRoadCamber,
             'YXZ'
           );
         }
@@ -1002,8 +1013,27 @@ export default function Track3DModal({
         }
 
         if (deltaTagRef.current) {
-          if (isComparing && carPose && ghostPose && ghostP) {
-            const curDeltaSec = ((p.time || 0) - (ghostP.time || 0));
+          if (isComparing && carPose && ghostPose && ghostP && !hiddenDeltaTagRef.current) {
+            // Position-aligned delta: compare each lap's time at the SAME point
+            // on the circuit. Using p.time - ghostP.time would always be ~0,
+            // because both cars share one replay clock, so the badge would sit
+            // at "-0.00s" forever. comparisonData already aligns both laps over
+            // normalized distance and carries the true delta.
+            let curDeltaSec = null;
+            const driverPct = p.dist_pct;
+            if (compList.length > 1 && driverPct != null) {
+              const idx = Math.round(
+                Math.max(0, Math.min(1, driverPct)) * (compList.length - 1)
+              );
+              curDeltaSec = compList[idx]?.delta ?? null;
+            } else {
+              // No aligned comparison available; fall back to each lap's own
+              // elapsed time so the badge still shows a meaningful gap.
+              const refTime = p.time;
+              const compTime = ghostP.time;
+              if (refTime != null && compTime != null) curDeltaSec = refTime - compTime;
+            }
+
             const curDeltaMeters = Math.hypot(carPose.x - ghostPose.x, carPose.z - ghostPose.z);
             deltaTagRef.current.update(carPose, ghostPose, curDeltaSec, curDeltaMeters);
           } else {
@@ -1726,6 +1756,19 @@ export default function Track3DModal({
           >
             <Gauge size={12} />
             Live data
+          </button>
+
+          {/* Toggle floating delta tag */}
+          <button
+            className={`btn btn-sm ${showDeltaTag ? 'btn-primary' : ''}`}
+            onClick={() => setShowDeltaTag(v => !v)}
+            aria-pressed={showDeltaTag}
+            disabled={!isComparing}
+            style={{ padding: '0.2rem 0.55rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+            title={isComparing ? 'Show or hide the +/− delta tag above the cars' : 'Delta tag needs a comparison lap'}
+          >
+            <Diff size={12} />
+            Delta tag
           </button>
 
           <button 

@@ -150,18 +150,23 @@ function interpolateKeypoints(keypoints, u) {
  * Returns the track elevation (meters) and camber (radians) at a given lap fraction (0..1)
  */
 export function getTrackElevation(trackName, distPct, sample = null) {
-  // If telemetry sample has explicit measured 3D altitude, respect it
+  const circuitKey = matchCircuitKey(trackName);
+  const known = circuitKey && TRACK_ELEVATION_DATABASE[circuitKey]
+    ? interpolateKeypoints(TRACK_ELEVATION_DATABASE[circuitKey], distPct)
+    : null;
+
+  // A measured in-game altitude overrides the circuit's elevation profile, but
+  // it must NOT wipe the banking: banking is a property of the circuit, not of
+  // the sample. Keeping camber from the database is what lets a banked oval
+  // like Daytona render its 31-degree turns even when the log carries altitude.
   if (sample && (sample.world_z != null || sample.elevation != null)) {
     const rawElev = sample.world_z != null ? sample.world_z : sample.elevation;
     if (Number.isFinite(rawElev)) {
-      return { elevation: rawElev, camber: 0 };
+      return { elevation: rawElev, camber: known ? known.camber : 0 };
     }
   }
 
-  const circuitKey = matchCircuitKey(trackName);
-  if (circuitKey && TRACK_ELEVATION_DATABASE[circuitKey]) {
-    return interpolateKeypoints(TRACK_ELEVATION_DATABASE[circuitKey], distPct);
-  }
+  if (known) return known;
 
   // Realistic natural multi-harmonic elevation fallback for unlisted tracks
   const u = ((distPct % 1.0) + 1.0) % 1.0;
