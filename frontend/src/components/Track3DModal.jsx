@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { X, Play, Pause, RotateCcw, ZoomIn, ZoomOut, Zap, Sun, Moon, Sunset, Volume2, VolumeX, Video, Activity, Gauge, Diff, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, Play, Pause, RotateCcw, ZoomIn, ZoomOut, Zap, Sun, Moon, Sunset, Volume2, VolumeX, Video, Activity, Gauge, Diff, Layers, ChevronDown, ChevronUp } from 'lucide-react';
 import {
   buildSplineFromSamples,
   buildRoadRibbon,
@@ -31,7 +31,12 @@ export default function Track3DModal({
   compLapNumber = 1,
   initialFocusPct = 0,
   corners = [],
-  activeCornerId = null
+  activeCornerId = null,
+  sessionTelemetry = null,
+  sessionTelemetryLoading = false,
+  multiLapEnabled = false,
+  onToggleMultiLap = null,
+  laps = []
 }) {
   const mountRef = useRef(null);
   const minimapCanvasRef = useRef(null);
@@ -97,6 +102,14 @@ export default function Track3DModal({
   const lastUiTimeRef = useRef(0);
   const lastFrameTimeRef = useRef(0);
 
+  // Multi-lap replay refs read inside the animation loop, kept in sync with the
+  // derived values so the loop never depends on stale closures.
+  const multiLapActiveRef = useRef(false);
+  const multiLapDurationRef = useRef(0);
+  const lapDurationRef = useRef(118.28);
+  const sampleAtSessionTimeRef = useRef(() => null);
+  const lapMarksRef = useRef([]);
+
   // Adaptive quality: drops resolution and shadow cost when the frame time
   // climbs, then restores it when there is headroom again. Keeps the replay
   // usable on weaker GPUs without a manual quality setting.
@@ -133,6 +146,13 @@ export default function Track3DModal({
   useEffect(() => { zoomLevelRef.current = zoomLevel; }, [zoomLevel]);
   useEffect(() => { hiddenDeltaTagRef.current = !showDeltaTag; }, [showDeltaTag]);
   useEffect(() => { activeCornerRef.current = activeCornerId; }, [activeCornerId]);
+  useEffect(() => {
+    multiLapActiveRef.current = multiLapActive;
+    multiLapDurationRef.current = multiLapDuration;
+    lapDurationRef.current = lapDuration;
+    sampleAtSessionTimeRef.current = sampleAtSessionTime;
+    lapMarksRef.current = lapMarks;
+  }, [multiLapActive, multiLapDuration, lapDuration, sampleAtSessionTime, lapMarks]);
   useEffect(() => {
     activeCarRef.current = activeCar;
     isChaseCamInitRef.current = false;
@@ -260,6 +280,66 @@ export default function Track3DModal({
     return dur > 0 ? dur : 118.28;
   }, [validSamples]);
 
+  // Multi-lap replay: the session endpoint returns every flying lap laid out on
+  // one continuous timeline (session_time). When active, the replay clock runs
+  // over that whole span and the driver car is resolved per lap, while the
+  // track spline still comes from the reference lap.
+  const sessionSamples = useMemo(() => {
+    const s = sessionTelemetry?.samples || [];
+    return s.filter((x) => Number.isFinite(x.world_x) && Number.isFinite(x.world_y));
+  }, [sessionTelemetry]);
+
+  const multiLapActive = multiLapEnabled && sessionSamples.length > 1;
+
+  const multiLapDuration = useMemo(() => {
+    if (!multiLapActive) return 0;
+    const total = sessionTelemetry?.total_duration;
+    if (Number.isFinite(total) && total > 0) return total;
+    const last = sessionSamples[sessionSamples.length - 1];
+    return last?.session_time || 0;
+  }, [multiLapActive, sessionTelemetry, sessionSamples]);
+
+  const lapMarks = useMemo(() => sessionTelemetry?.laps || [], [sessionTelemetry]);
+
+  // Continuous replay span: multi-lap when enabled, otherwise the reference lap.
+  const replayDuration = multiLapActive ? multiLapDuration : lapDuration;
+
+  // Resolve a session_time to the sample on the concatenated timeline.
+  const sampleAtSessionTime = useCallback((t) => {
+    if (sessionSamples.length === 0) return null;
+    if (sessionSamples.length === 1) return sessionSamples[0];
+    const first = sessionSamples[0].session_time ?? 0;
+    const last = sessionSamples[sessionSamples.length - 1].session_time ?? 0;
+    const span = last - first || 1;
+    const u = Math.max(0, Math.min(1, (t - first) / span));
+    const f = u * (sessionSamples.length - 1);
+    const i0 = Math.floor(f);
+    const i1 = Math.min(sessionSamples.length - 1, i0 + 1);
+    const a = f - i0;
+    const s0 = sessionSamples[i0];
+    const s1 = sessionSamples[i1];
+    return {
+      ...s0,
+      time: t,
+      dist_pct: s0.dist_pct + a * (s1.dist_pct - s0.dist_pct),
+      speed: s0.speed + a * (s1.speed - s0.speed),
+      gear: a > 0.5 ? s1.gear : s0.gear,
+      rpm: Math.round(s0.rpm + a * (s1.rpm - s0.rpm)),
+      throttle: s0.throttle + a * (s1.throttle - s0.throttle),
+      brake: s0.brake + a * (s1.brake - s0.brake),
+      steering: Math.round(s0.steering + a * (s1.steering - s0.steering)),
+      lat_g: s0.lat_g + a * (s1.lat_g - s0.lat_g),
+      lon_g: s0.lon_g + a * (s1.lon_g - s0.lon_g),
+      world_x: s0.world_x + a * (s1.world_x - s0.world_x),
+      world_y: s0.world_y + a * (s1.world_y - s0.world_y),
+      path_lateral:
+        s0.path_lateral !== undefined && s1.path_lateral !== undefined
+          ? s0.path_lateral + a * (s1.path_lateral - s0.path_lateral)
+          : undefined,
+      lap_number: s0.lap_number
+    };
+  }, [sessionSamples]);
+
   // --------------------------------------------------------------------------
   // 1. Precalculate Smooth Continuous Track Spline & Unwrapped Headings
   // --------------------------------------------------------------------------
@@ -330,11 +410,15 @@ export default function Track3DModal({
     }
   }, [isOpen, initialFocusPct, normalizedSamples, lapDuration, poseTracker, ghostTracker]);
 
-  // Interpolated active sample for UI gauge
+  // Interpolated active sample for UI gauge. Multi-lap replay reads the
+  // concatenated session timeline so the HUD matches the car on screen.
   const activePoint = useMemo(() => {
+    if (multiLapActive) {
+      return sampleAtSessionTime(uiReplayTime);
+    }
     if (normalizedSamples.length < 2) return null;
     return interpolateSpline(normalizedSamples, uiReplayTime, lapDuration);
-  }, [normalizedSamples, uiReplayTime, lapDuration]);
+  }, [multiLapActive, sampleAtSessionTime, uiReplayTime, normalizedSamples, lapDuration]);
 
   // Comparison point for UI gauge & delta calculation
   const activeCompPoint = useMemo(() => {
@@ -652,10 +736,12 @@ export default function Track3DModal({
         }
       }
 
-      // Advance replay time
+      // Advance replay time. The span is the whole session timeline when
+      // multi-lap replay is on, otherwise a single reference lap.
+      const spanDuration = multiLapActiveRef.current ? multiLapDurationRef.current : lapDurationRef.current;
       if (isPlayingRef.current) {
         let nextTime = replayTimeRef.current + dt * playbackSpeedRef.current;
-        if (nextTime >= lapDuration) {
+        if (nextTime >= spanDuration) {
           nextTime = 0; // seamless loop
         }
         replayTimeRef.current = nextTime;
@@ -672,7 +758,9 @@ export default function Track3DModal({
       // 1. Resolve driver car position on the spline, then smooth heading and body
       // attitude. The car never snaps: yaw rate is capped and the lateral G
       // channel drives roll, so a slow hairpin reads as a slow rotation.
-      const p = interpolateSpline(normalizedSamples, curSec, lapDuration);
+      const p = multiLapActiveRef.current
+        ? sampleAtSessionTimeRef.current(curSec)
+        : interpolateSpline(normalizedSamples, curSec, lapDuration);
       let carPose = null;
       let carHeading = 0;
       let carX = 0, carZ = 0;
@@ -691,7 +779,21 @@ export default function Track3DModal({
         const carY = carPose.elevation != null ? carPose.elevation : (carSplinePose ? carSplinePose.y : 0);
 
         let travelHeading = carPose.heading;
-        if (trackModel && normalizedSamples.length > 1) {
+        if (multiLapActiveRef.current) {
+          // Look a fraction of a second ahead on the same continuous timeline so
+          // the car keeps a sane heading across a lap boundary.
+          const nextP = sampleAtSessionTimeRef.current(curSec + 0.08);
+          if (nextP) {
+            const nextPose = resolveTrackRelative(nextP, trackModel, trackName);
+            if (nextPose) {
+              const fdx = nextPose.x - carX;
+              const fdz = nextPose.z - carZ;
+              if (Math.hypot(fdx, fdz) > 0.005) {
+                travelHeading = Math.atan2(fdx, fdz);
+              }
+            }
+          }
+        } else if (trackModel && normalizedSamples.length > 1) {
           const forwardSec = (curSec + 0.08) % lapDuration;
           const nextP = interpolateSpline(normalizedSamples, forwardSec, lapDuration);
           if (nextP) {
@@ -1771,6 +1873,29 @@ export default function Track3DModal({
             Delta tag
           </button>
 
+          {/* Multi-lap replay toggle */}
+          {onToggleMultiLap && (
+            <button
+              className={`btn btn-sm ${multiLapEnabled ? 'btn-primary' : ''}`}
+              onClick={onToggleMultiLap}
+              aria-pressed={multiLapEnabled}
+              disabled={laps.length < 2 || sessionTelemetryLoading}
+              style={{ padding: '0.2rem 0.55rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+              title={
+                laps.length < 2
+                  ? 'Needs at least two flying laps'
+                  : 'Replay every flying lap back to back on one timeline'
+              }
+            >
+              <Layers size={12} />
+              {sessionTelemetryLoading
+                ? 'Loading…'
+                : multiLapEnabled
+                  ? `All laps (${laps.length})`
+                  : 'All laps'}
+            </button>
+          )}
+
           <button 
             className="btn btn-sm"
             onClick={onClose}
@@ -2290,7 +2415,7 @@ export default function Track3DModal({
             <input
               type="range"
               min="0"
-              max={lapDuration}
+              max={replayDuration}
               step="0.05"
               value={uiReplayTime}
               onChange={(e) => {
@@ -2307,13 +2432,36 @@ export default function Track3DModal({
             />
 
             <span style={{ fontSize: '0.72rem', color: '#9aa6b2', minWidth: '65px', textAlign: 'right' }} className="mono">
-              {formatTime(lapDuration)}
+              {formatTime(replayDuration)}
             </span>
 
-            <span style={{ fontSize: '0.72rem', color: '#6b7785', minWidth: '40px' }} className="mono">
-              {activePoint ? `${(activePoint.dist_pct * 100).toFixed(0)}%` : '0%'}
-            </span>
+            {multiLapActive && activePoint?.lap_number != null ? (
+              <span style={{ fontSize: '0.72rem', color: '#ff8a3d', minWidth: '52px', fontWeight: 700 }} className="mono">
+                Lap {activePoint.lap_number}
+              </span>
+            ) : (
+              <span style={{ fontSize: '0.72rem', color: '#6b7785', minWidth: '52px' }} className="mono">
+                {activePoint ? `${(activePoint.dist_pct * 100).toFixed(0)}%` : '0%'}
+              </span>
+            )}
           </div>
+
+          {/* Multi-lap lap markers */}
+          {multiLapActive && lapMarks.length > 1 && (
+            <div style={{ display: 'flex', gap: '2px', height: 4, marginTop: '-2px' }}>
+              {lapMarks.map((m) => (
+                <span
+                  key={m.lap_number}
+                  title={`Lap ${m.lap_number}${m.lap_time ? ` · ${formatTime(m.lap_time)}` : ''}`}
+                  style={{
+                    flex: Math.max(0.001, (m.end_time - m.start_time) / Math.max(0.001, replayDuration)),
+                    background: activePoint?.lap_number === m.lap_number ? '#ff8a3d' : '#333d4b',
+                    borderRadius: 2
+                  }}
+                />
+              ))}
+            </div>
+          )}
 
           {/* Transport Buttons: Play, Pause, Speeds, Reset */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>

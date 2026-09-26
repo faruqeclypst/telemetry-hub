@@ -21,6 +21,26 @@ function catmullRomPoint(p0, p1, p2, p3, t) {
   return b1.clone().lerp(b2, (tt - t1) / (t2 - t1));
 }
 
+// Same centripetal Catmull-Rom weights as catmullRomPoint, applied to a scalar
+// (used for the camber field so banking curves with the centreline).
+function catmullRomScalar(t, p0, p1, p2, p3) {
+  const t0 = 0;
+  const t1 = t0 + 1;
+  const t2 = t1 + 1;
+  const t3 = t2 + 1;
+  const tt = t1 + (t2 - t1) * t;
+  const lerp = (a, b, f) => a + (b - a) * f;
+  const a1 = lerp(p0, p1, (tt - t0) / (t1 - t0));
+  const a2 = lerp(p1, p2, (tt - t1) / (t2 - t1));
+  const a3 = lerp(p2, p3, (tt - t2) / (t3 - t2));
+  const b1 = lerp(a1, a2, (tt - t0) / (t2 - t0));
+  const b2 = lerp(a2, a3, (tt - t1) / (t3 - t1));
+  return lerp(b1, b2, (tt - t1) / (t2 - t1));
+}
+
+// Vector3.clone()/lerp() drop custom properties, so camber would be lost the
+// moment a point is cloned or interpolated. It is therefore carried explicitly
+// through every step of the centreline pipeline (resample, smooth, eval).
 function dedupe(points, minGap = 0.05) {
   const out = [points[0]];
   for (let i = 1; i < points.length; i++) {
@@ -43,7 +63,13 @@ function resampleUniform(points, spacing) {
     while (cursor < points.length - 2 && cum[cursor + 1] < target) cursor++;
     const seg = cum[cursor + 1] - cum[cursor];
     const a = seg > 1e-6 ? (target - cum[cursor]) / seg : 0;
-    out.push(points[cursor].clone().lerp(points[cursor + 1], Math.min(1, Math.max(0, a))));
+    const clampedA = Math.min(1, Math.max(0, a));
+    const p = points[cursor].clone().lerp(points[cursor + 1], clampedA);
+    // Camber is a scalar field, so interpolate it between the same neighbours.
+    const c0 = points[cursor].camber || 0;
+    const c1 = points[cursor + 1].camber || 0;
+    p.camber = c0 + (c1 - c0) * clampedA;
+    out.push(p);
   }
   return out;
 }
@@ -77,7 +103,11 @@ export function buildTrackSpline(rawPoints, options = {}) {
     const next = controls.map((p, i) => {
       const prev = controls[i - 1] || (closed ? controls[controls.length - 1] : controls[i]);
       const nxt = controls[i + 1] || (closed ? controls[0] : controls[i]);
-      return p.clone().multiplyScalar(0.5).add(prev.clone().multiplyScalar(0.25)).add(nxt.clone().multiplyScalar(0.25));
+      const smoothed = p.clone().multiplyScalar(0.5).add(prev.clone().multiplyScalar(0.25)).add(nxt.clone().multiplyScalar(0.25));
+      // Smooth camber with the same weights so banking curves stay continuous.
+      smoothed.camber =
+        (p.camber || 0) * 0.5 + (prev.camber || 0) * 0.25 + (nxt.camber || 0) * 0.25;
+      return smoothed;
     });
     controls = next;
   }
@@ -113,7 +143,17 @@ export function buildTrackSpline(rawPoints, options = {}) {
     const i2 = closed ? (i + 1) % n : Math.min(n - 1, i + 1);
     const i3 = closed ? (i + 2) % n : Math.min(n - 1, i + 2);
 
-    return catmullRomPoint(controls[i0], controls[i1], controls[i2], controls[i3], t);
+    const point = catmullRomPoint(controls[i0], controls[i1], controls[i2], controls[i3], t);
+    // Interpolate camber along the same Catmull-Rom segment so the banking
+    // follows the curve rather than the coarse control spacing.
+    point.camber = catmullRomScalar(
+      t,
+      controls[i0].camber || 0,
+      controls[i1].camber || 0,
+      controls[i2].camber || 0,
+      controls[i3].camber || 0
+    );
+    return point;
   };
 
   const EPS = 1e-3;

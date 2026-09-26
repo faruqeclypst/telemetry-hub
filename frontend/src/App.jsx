@@ -24,6 +24,12 @@ export default function App() {
   const [comparisonData, setComparisonData] = useState(null);
   const [hoverIndex, setHoverIndex] = useState(null);
 
+  // Session-wide telemetry (all flying laps on one timeline) for multi-lap
+  // replay. Null until the 3D replay asks for it.
+  const [sessionTelemetry, setSessionTelemetry] = useState(null);
+  const [sessionTelemetryLoading, setSessionTelemetryLoading] = useState(false);
+  const [multiLapEnabled, setMultiLapEnabled] = useState(false);
+
   const [corners, setCorners] = useState([]);
   const [cornersLoading, setCornersLoading] = useState(false);
   const [cornersError, setCornersError] = useState(null);
@@ -174,7 +180,44 @@ export default function App() {
     };
   }, [selectedSessionId, compareLap]);
 
-  // 5. Delta comparison
+  // 4b. Session-wide telemetry for multi-lap replay. Fetched only when the
+  // replay asks for it, so the normal single-lap view stays light.
+  useEffect(() => {
+    if (!multiLapEnabled || !selectedSessionId) {
+      setSessionTelemetry(null);
+      setSessionTelemetryLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSessionTelemetryLoading(true);
+
+    fetch(apiUrl(`/api/sessions/${selectedSessionId}/telemetry?lod=1200`))
+      .then((res) => {
+        if (!res.ok) throw new Error('Session telemetry unavailable');
+        return res.json();
+      })
+      .then((data) => {
+        if (!cancelled) setSessionTelemetry(data);
+      })
+      .catch(() => {
+        if (!cancelled) setSessionTelemetry(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSessionTelemetryLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [multiLapEnabled, selectedSessionId]);
+
+  // Reset the multi-lap preference whenever the session changes.
+  useEffect(() => {
+    setMultiLapEnabled(false);
+    setSessionTelemetry(null);
+  }, [selectedSessionId]);
+
   useEffect(() => {
     if (!isComparing || compareLap === null || !selectedSessionId || selectedLap === null) {
       setComparisonData(null);
@@ -550,6 +593,11 @@ export default function App() {
           initialFocusPct={is3DFocusPct}
           corners={corners}
           activeCornerId={activeCornerId}
+          sessionTelemetry={sessionTelemetry}
+          sessionTelemetryLoading={sessionTelemetryLoading}
+          multiLapEnabled={multiLapEnabled}
+          onToggleMultiLap={() => setMultiLapEnabled(v => !v)}
+          laps={(sessionData?.laps || []).filter(l => l.is_valid && !l.is_pit_lap)}
         />
       </ErrorBoundary>
     </div>

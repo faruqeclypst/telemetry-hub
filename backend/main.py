@@ -100,6 +100,78 @@ def get_lap_telemetry(session_id: str, lap_num: int, lod: Optional[int] = Query(
         "samples": samples
     }
 
+@app.get("/api/sessions/{session_id}/telemetry")
+def get_session_telemetry(
+    session_id: str,
+    lod: Optional[int] = Query(None, description="Target points per lap"),
+    from_lap: Optional[int] = Query(None, description="First lap number (inclusive)"),
+    to_lap: Optional[int] = Query(None, description="Last lap number (inclusive)")
+):
+    """All laps of a session concatenated in lap order on one continuous timeline.
+
+    Each sample keeps the lap metadata the replay needs to switch laps without
+    rebuilding the track. Only completed, non-pit laps are included so the
+    timeline does not contain the partial out lap.
+    """
+    sess = get_session_by_id(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    laps = sess.get("laps", [])
+    if from_lap is not None:
+        laps = [l for l in laps if l["lap_number"] >= from_lap]
+    if to_lap is not None:
+        laps = [l for l in laps if l["lap_number"] <= to_lap]
+    laps = sorted([l for l in laps if l.get("is_valid") and not l.get("is_pit_lap")], key=lambda l: l["lap_number"])
+
+    if not laps:
+        raise HTTPException(status_code=404, detail="No valid flying laps in this session")
+
+    merged = []
+    lap_marks = []
+    offset = 0.0
+    for lap in laps:
+        samples = get_telemetry_cache(session_id, lap["lap_number"])
+        if not samples:
+            local_path = lap.get("local_blob_path")
+            if local_path and os.path.exists(local_path):
+                with open(local_path, "rb") as f:
+                    samples = RXTMParser.parse_binary(f.read())["samples"]
+                    save_telemetry_cache(session_id, lap["lap_number"], samples)
+        if not samples:
+            continue
+
+        if lod and lod > 0 and len(samples) > lod:
+            step = max(1, len(samples) // lod)
+            samples = samples[::step]
+
+        t0 = samples[0]["time"]
+        for s in samples:
+            point = dict(s)
+            point["lap_number"] = lap["lap_number"]
+            point["lap_time"] = lap.get("lap_time")
+            point["session_time"] = s["time"] + offset - t0
+            merged.append(point)
+
+        lap_dur = (samples[-1]["time"] - t0) if len(samples) > 1 else 0.0
+        lap_marks.append({
+            "lap_number": lap["lap_number"],
+            "start_time": offset,
+            "end_time": offset + lap_dur,
+            "lap_time": lap.get("lap_time")
+        })
+        offset += lap_dur
+
+    return {
+        "session_id": session_id,
+        "lap_count": len(lap_marks),
+        "total_samples": len(merged),
+        "total_duration": offset,
+        "laps": lap_marks,
+        "samples": merged
+    }
+
+
 @app.get("/api/sessions/{session_id}/laps/{lap_num}/corners")
 def get_lap_corners(
     session_id: str,
