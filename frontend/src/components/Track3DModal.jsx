@@ -3110,15 +3110,18 @@ function buildTrackCenterlineOnce(points, stepM, smoothHalf, trackName = '') {
   }
 
   const elevations = new Float64Array(numSlices);
+  const cambers = new Float64Array(numSlices);
   for (let s = 0; s < numSlices; s++) {
-    const { elevation } = getTrackElevation(trackName, slicePct[s]);
+    const { elevation, camber } = getTrackElevation(trackName, slicePct[s]);
     elevations[s] = elevation;
+    cambers[s] = camber || 0;
   }
 
   return {
     xs: smoothX,
     ys: smoothY,
     elevations,
+    cambers,
     headings: smoothH,
     pcts: slicePct,
     isLoop,
@@ -3130,7 +3133,7 @@ function buildTrackCenterlineOnce(points, stepM, smoothHalf, trackName = '') {
 // Frame (centerPosition + tangent + elevation) of the track at a normalized lap distance
 function trackFrameAtPct(model, pct) {
   if (!model) return null;
-  const { xs, ys, headings, pcts, numSlices, elevations } = model;
+  const { xs, ys, headings, pcts, numSlices, elevations, cambers } = model;
   let p = pct;
   if (!(p >= 0)) p = 0;
   if (p <= pcts[0]) {
@@ -3138,6 +3141,7 @@ function trackFrameAtPct(model, pct) {
       x: xs[0],
       y: ys[0],
       elevation: elevations ? elevations[0] : 0,
+      camber: cambers ? cambers[0] : 0,
       heading: headings[0]
     };
   }
@@ -3146,6 +3150,7 @@ function trackFrameAtPct(model, pct) {
       x: xs[numSlices - 1],
       y: ys[numSlices - 1],
       elevation: elevations ? elevations[numSlices - 1] : 0,
+      camber: cambers ? cambers[numSlices - 1] : 0,
       heading: headings[numSlices - 1]
     };
   }
@@ -3162,6 +3167,7 @@ function trackFrameAtPct(model, pct) {
     x: xs[lo] + a * (xs[hi] - xs[lo]),
     y: ys[lo] + a * (ys[hi] - ys[lo]),
     elevation: elevations ? elevations[lo] + a * (elevations[hi] - elevations[lo]) : 0,
+    camber: cambers ? cambers[lo] + a * (cambers[hi] - cambers[lo]) : 0,
     heading: lerpAngle(headings[lo], headings[hi], a)
   };
 }
@@ -3205,6 +3211,7 @@ function resolveTrackRelative(point, model, trackName = '') {
   let cy;
   let trackH;
   let elev = 0;
+  let camber = 0;
 
   // Preferred: resolve against the canonical centerline model at this lap
   // distance, so the car always sits exactly on the rendered road surface.
@@ -3214,11 +3221,14 @@ function resolveTrackRelative(point, model, trackName = '') {
     cx = frame.x;
     cy = frame.y;
     elev = frame.elevation || 0;
+    camber = frame.camber || 0;
   } else {
     trackH = point.track_heading !== undefined ? point.track_heading : (point.heading || 0);
     cx = point.track_center_x !== undefined ? point.track_center_x : (point.world_x || 0);
     cy = point.track_center_y !== undefined ? point.track_center_y : (point.world_y || 0);
-    elev = getTrackElevation(trackName, point.dist_pct || 0, point).elevation || 0;
+    const ge = getTrackElevation(trackName, point.dist_pct || 0, point);
+    elev = ge.elevation || 0;
+    camber = ge.camber || 0;
   }
 
   // Car body heading aligns with its actual travel path trajectory
@@ -3247,12 +3257,19 @@ function resolveTrackRelative(point, model, trackName = '') {
   const x = cx + rx * plat;
   const mapY = cy + ry * plat;
 
+  // Banked surface: the road ribbon raises its vertex by off * sin(camber) along
+  // the spline normal, and the spline normal is the negative of the telemetry
+  // right vector, so the car's lateral offset contributes -plat * sin(camber)
+  // to its height. Without this the car sinks into (or floats above) banking.
+  const surfaceY = elev - plat * Math.sin(camber);
+
   return {
     x,
-    y: elev,
+    y: surfaceY,
     z: -mapY,
     worldY: mapY,
-    elevation: elev,
+    elevation: surfaceY,
+    camber,
     heading: th,
     trackHeading: trackH,
     centerX: cx,
