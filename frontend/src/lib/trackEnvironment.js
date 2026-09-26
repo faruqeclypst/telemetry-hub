@@ -1361,7 +1361,10 @@ export function createTracksideProps(scene, spline, options = {}) {
     group.add(tires);
   }
 
-  // ---- 8d. Grandstands along the straights --------------------------------
+  // ---- 8d. Grandstands facing the track -----------------------------------
+  // Stands are placed outboard of the barrier and rotated so their open side
+  // faces the circuit. In this local frame +Z is "toward the track", the rows
+  // step back along -Z and rise, and the roof cantilevers over the front row.
   const standCount = 6;
   const standSections = [];
   for (let i = 0; i < standCount; i++) {
@@ -1373,69 +1376,94 @@ export function createTracksideProps(scene, spline, options = {}) {
     const cz = pose.z + pose.normalZ * offset;
     if (blocksCamera(cx, cz)) continue;
     const base = groundY(cx, cz);
-    standSections.push({ cx, cz, base, heading: pose.heading, pose });
+    // Yaw that points local +Z from the stand back toward the track centre.
+    const yaw = pose.heading - (Math.PI / 2) * side;
+    standSections.push({ cx, cz, base, yaw, side });
   }
 
   if (standSections.length > 0) {
-    // Seating deck + stepped rows, built once per stand but sharing materials.
+    const rows = 8;
+    const width = 46;
+    const rowDepth = 1.15;
+    const rowRise = 0.42;
+    const totalDepth = rows * rowDepth;
+
     for (const stand of standSections) {
-      const rows = 8;
-      const width = 46;
-      const rowDepth = 1.15;
-      const rowRise = 0.42;
       const standGroup = new THREE.Group();
       standGroup.position.set(stand.cx, stand.base, stand.cz);
-      standGroup.rotation.y = stand.heading;
+      standGroup.rotation.y = stand.yaw;
 
-      const deck = new THREE.Mesh(new THREE.BoxGeometry(width, 0.5, rows * rowDepth), concreteMat);
-      deck.position.set(0, 0.25, -(rows * rowDepth) / 2);
-      deck.receiveShadow = true;
-      standGroup.add(deck);
-
+      // Rows climb away from the track, so the lowest row is nearest the front
+      // edge (+Z) and the highest is at the back (-Z).
       for (let r = 0; r < rows; r++) {
-        const rowGeo = new THREE.BoxGeometry(width, rowRise, rowDepth * 0.86);
-        const row = new THREE.Mesh(rowGeo, concreteMat);
-        row.position.set(0, 0.5 + r * rowRise + rowRise / 2, -r * rowDepth - rowDepth * 0.5);
-        row.receiveShadow = true;
-        standGroup.add(row);
+        const z = -r * rowDepth;
+        const step = new THREE.Mesh(
+          new THREE.BoxGeometry(width, rowRise * (r + 1), rowDepth * 0.9),
+          concreteMat
+        );
+        step.position.set(0, (rowRise * (r + 1)) / 2, z);
+        step.receiveShadow = true;
+        standGroup.add(step);
 
-        if (r % 2 === 0) {
-          const seats = new THREE.Mesh(new THREE.BoxGeometry(width - 1.2, 0.16, rowDepth * 0.5), metalMat);
-          seats.position.set(0, 0.5 + r * rowRise + rowRise + 0.08, -r * rowDepth - rowDepth * 0.4);
-          standGroup.add(seats);
-        }
+        const seats = new THREE.Mesh(
+          new THREE.BoxGeometry(width - 1.2, 0.16, rowDepth * 0.55),
+          metalMat
+        );
+        seats.position.set(0, rowRise * (r + 1) + 0.08, z + rowDepth * 0.18);
+        standGroup.add(seats);
       }
 
-      const roof = new THREE.Mesh(new THREE.BoxGeometry(width + 2, 0.3, rows * rowDepth + 2), guardMat);
-      roof.position.set(0, 0.5 + rows * rowRise + 3.6, -(rows * rowDepth) / 2);
-      roof.rotation.x = -0.16;
+      const topY = rowRise * rows;
+
+      // Front retaining wall along the lowest row, facing the track.
+      const facade = new THREE.Mesh(new THREE.BoxGeometry(width, 1.6, 0.35), concreteMat);
+      facade.position.set(0, 0.8, rowDepth * 0.45);
+      facade.castShadow = true;
+      standGroup.add(facade);
+
+      // Roof: cantilevered forward over the front rows, sloping up to the back.
+      const roofDepth = totalDepth + 5.0;
+      const roof = new THREE.Mesh(new THREE.BoxGeometry(width + 3, 0.35, roofDepth), guardMat);
+      roof.position.set(0, topY + 4.6, -totalDepth / 2 + 1.6);
+      roof.rotation.x = 0.09;
       roof.castShadow = true;
       standGroup.add(roof);
 
+      // Roof support columns at the two front corners.
       for (const sx of [-1, 1]) {
-        for (const sz of [1, -1]) {
-          const pier = new THREE.Mesh(new THREE.BoxGeometry(0.35, rows * rowRise + 3.6, 0.35), metalMat);
-          pier.position.set(sx * (width / 2 - 0.6), (rows * rowRise + 3.6) / 2, sz * (rows * rowDepth) / 2 - rowDepth * 0.5);
-          pier.castShadow = true;
-          standGroup.add(pier);
-        }
+        const col = new THREE.Mesh(new THREE.BoxGeometry(0.4, topY + 4.6, 0.4), metalMat);
+        col.position.set(sx * (width / 2 + 0.8), (topY + 4.6) / 2, rowDepth * 0.45);
+        col.castShadow = true;
+        standGroup.add(col);
       }
 
-      // Crowd blocks: instanced, low-poly, muted palette.
+      // Rear concourse / paddock building mass behind the seating.
+      const back = new THREE.Mesh(new THREE.BoxGeometry(width + 6, 5.0, 8.0), concreteMat);
+      back.position.set(0, 2.5, -totalDepth - 4.0);
+      back.castShadow = true;
+      back.receiveShadow = true;
+      standGroup.add(back);
+
+      const backRoof = new THREE.Mesh(new THREE.BoxGeometry(width + 6.6, 0.4, 8.6), boardFrameMat);
+      backRoof.position.set(0, 5.2, -totalDepth - 4.0);
+      standGroup.add(backRoof);
+
+      // Crowd blocks: instanced, low-poly, muted palette, sitting on each row.
       const crowdGeo = new THREE.BoxGeometry(0.42, 0.72, 0.34);
       const crowdMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0.02 });
-      const crowdCount = rows * 46 * 0.55 | 0;
-      const crowd = new THREE.InstancedMesh(crowdGeo, crowdMat, crowdCount);
+      const crowdBudget = rows * Math.floor(width) * 2;
+      const crowd = new THREE.InstancedMesh(crowdGeo, crowdMat, crowdBudget);
       const dummy = new THREE.Object3D();
       const color = new THREE.Color();
       const palette = [0x2c3e50, 0x7f8c8d, 0xc0392b, 0x2980b9, 0xd35400, 0x8e44ad, 0x27ae60, 0x95a5a6, 0xecf0f1, 0x34495e];
       let idx = 0;
-      for (let r = 0; r < rows && idx < crowdCount; r++) {
-        for (let c = 0; c < width - 1 && idx < crowdCount; c++) {
-          if (Math.random() > 0.55) continue;
-          const px = -width / 2 + 0.6 + c;
-          const pz = -r * rowDepth - rowDepth * 0.5;
-          dummy.position.set(px, 0.5 + r * rowRise + rowRise + 0.36, pz);
+      for (let r = 0; r < rows; r++) {
+        const z = -r * rowDepth;
+        const seatY = rowRise * (r + 1) + 0.16;
+        for (let c = 0; c < width - 1; c++) {
+          if (idx >= crowdBudget) break;
+          if (Math.random() > 0.62) continue;
+          dummy.position.set(-width / 2 + 0.6 + c, seatY + 0.36, z + rowDepth * 0.18);
           dummy.rotation.set(0, Math.random() * Math.PI * 2, 0);
           dummy.scale.set(1, 0.9 + Math.random() * 0.25, 1);
           dummy.updateMatrix();
