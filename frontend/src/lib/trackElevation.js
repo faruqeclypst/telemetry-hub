@@ -136,11 +136,14 @@ function interpolateKeypoints(keypoints, u) {
   );
 
   const c0 = p0[2] || 0, c1 = p1[2] || 0, c2 = p2[2] || 0, c3 = p3[2] || 0;
+  // Same Catmull-Rom basis as the elevation above. Using the real neighbour c3
+  // (not a zero term) is what keeps the camber tangent continuous, so banking
+  // eases in and out at every keypoint instead of kinking.
   const camber = 0.5 * (
     (2 * c1) +
     (-c0 + c2) * t +
     (2 * c0 - 5 * c1 + 4 * c2 - c3) * t2 +
-    (-c0 + 3 * c1 - 3 * c2 + y3 * 0) * t3
+    (-c0 + 3 * c1 - 3 * c2 + c3) * t3
   );
 
   return { elevation: elev, camber };

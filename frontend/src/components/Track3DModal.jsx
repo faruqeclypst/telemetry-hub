@@ -110,6 +110,11 @@ export default function Track3DModal({
   const sampleAtSessionTimeRef = useRef(() => null);
   const lapMarksRef = useRef([]);
 
+  // Damped road-camber followers so the car eases into and out of banking
+  // instead of snapping when the surface cross-slope changes.
+  const carCamberRef = useRef(0);
+  const ghostCamberRef = useRef(0);
+
   // Adaptive quality: drops resolution and shadow cost when the frame time
   // climbs, then restores it when there is headroom again. Keeps the replay
   // usable on weaker GPUs without a manual quality setting.
@@ -822,11 +827,14 @@ export default function Track3DModal({
         );
         carHeading = attitude.heading;
 
+        // Ease the banking so the body rolls into the camber instead of snapping.
+        carCamberRef.current += (roadCamber - carCamberRef.current) * (1 - Math.exp(-8.0 * dt));
+
         carRef.current.position.set(carX, carY + CAR_RIDE_HEIGHT, carZ);
         // Roll = body lean from lateral G + the road's own cross-slope, so the
         // car banks with a banked oval instead of sitting flat on a tilted
         // surface.
-        carRef.current.rotation.set(attitude.pitch + roadPitch, carHeading, attitude.roll + roadCamber, 'YXZ');
+        carRef.current.rotation.set(attitude.pitch + roadPitch, carHeading, attitude.roll + carCamberRef.current, 'YXZ');
       }
 
       // 2. Smoothly interpolate ghost car position (track-relative, same centerline)
@@ -883,11 +891,12 @@ export default function Track3DModal({
             dt,
             { yawRateLimit: Math.max(4.0, Math.min(10.0, 3.0 + ghostSpeed * 0.04)), headingAlpha: 24.0 }
           );
+          ghostCamberRef.current += (ghostRoadCamber - ghostCamberRef.current) * (1 - Math.exp(-8.0 * dt));
           ghostCarRef.current.position.set(ghostPose.x, ghostY + CAR_RIDE_HEIGHT, ghostPose.z);
           ghostCarRef.current.rotation.set(
             ghostAttitude.pitch + ghostRoadPitch,
             ghostAttitude.heading,
-            ghostAttitude.roll + ghostRoadCamber,
+            ghostAttitude.roll + ghostCamberRef.current,
             'YXZ'
           );
         }
@@ -1303,13 +1312,13 @@ export default function Track3DModal({
       }
 
       // Max Gain & Max Loss Badges in HD
-      if (comparisonData?.max_gain) {
+      if (comparisonData?.max_gain && Number.isFinite(comparisonData.max_gain.diff)) {
         const mg = comparisonData.max_gain;
         const pt = toScreen(mg.world_x, mg.world_y);
         drawHDMinimapBadge(ctx, pt.x, pt.y, 'GAIN', `${mg.diff.toFixed(2)}s`, '#3fd68c', displayW);
       }
 
-      if (comparisonData?.max_loss) {
+      if (comparisonData?.max_loss && Number.isFinite(comparisonData.max_loss.diff)) {
         const ml = comparisonData.max_loss;
         const pt = toScreen(ml.world_x, ml.world_y);
         drawHDMinimapBadge(ctx, pt.x, pt.y, 'LOSS', `+${ml.diff.toFixed(2)}s`, '#ff5c5c', displayW);
@@ -2270,9 +2279,9 @@ export default function Track3DModal({
                     <span className="mono" style={{
                       fontSize: '0.78rem',
                       fontWeight: '800',
-                      color: minimapHover.compItem.delta <= 0 ? '#3fd68c' : '#ff5c5c'
+                      color: (minimapHover.compItem.delta || 0) <= 0 ? '#3fd68c' : '#ff5c5c'
                     }}>
-                      {minimapHover.compItem.delta <= 0 ? `${minimapHover.compItem.delta.toFixed(3)}s` : `+${minimapHover.compItem.delta.toFixed(3)}s`}
+                      {(minimapHover.compItem.delta || 0) <= 0 ? `${(minimapHover.compItem.delta || 0).toFixed(3)}s` : `+${(minimapHover.compItem.delta || 0).toFixed(3)}s`}
                     </span>
                   </div>
                 ) : (
@@ -2445,7 +2454,7 @@ export default function Track3DModal({
               </span>
             ) : (
               <span style={{ fontSize: '0.72rem', color: '#6b7785', minWidth: '52px' }} className="mono">
-                {activePoint ? `${(activePoint.dist_pct * 100).toFixed(0)}%` : '0%'}
+                {Number.isFinite(activePoint?.dist_pct) ? `${(activePoint.dist_pct * 100).toFixed(0)}%` : '0%'}
               </span>
             )}
           </div>
@@ -2681,7 +2690,10 @@ export default function Track3DModal({
                 <div style={{ background: '#0d1116', padding: '0.65rem 0.75rem', borderRadius: '6px', border: '1px solid #232b36' }}>
                   <div style={{ fontSize: '0.65rem', color: '#9aa6b2', fontWeight: '600' }}>ALTITUDE</div>
                   <div style={{ fontSize: '1.25rem', fontWeight: '800', color: '#35c7f0', lineHeight: 1.1 }} className="mono">
-                    {spline ? spline.poseAtPct(hudTelemetry.dist_pct || 0).y.toFixed(1) : '0.0'}
+                    {(() => {
+                      const alt = spline ? spline.poseAtPct(hudTelemetry.dist_pct || 0).y : 0;
+                      return Number.isFinite(alt) ? alt.toFixed(1) : '0.0';
+                    })()}
                     <span style={{ fontSize: '0.7rem', color: '#6b7785', marginLeft: '3px' }}>m</span>
                   </div>
                 </div>
@@ -2794,7 +2806,7 @@ export default function Track3DModal({
                     {activeCompPoint && activeCompPoint.status && (() => {
                       const isGhost = activeCar === 'ghost';
                       const rawDelta = activeCompPoint.delta;
-                      const relativeDelta = isGhost ? -rawDelta : rawDelta;
+                      const relativeDelta = (isGhost ? -rawDelta : rawDelta) || 0;
                       const isGaining = relativeDelta < -0.01;
                       const isLosing = relativeDelta > 0.01;
                       const statusLabel = isGaining ? 'GAINING TIME' : isLosing ? 'LOSING TIME' : 'EVEN';
@@ -2811,7 +2823,7 @@ export default function Track3DModal({
                   {activeCompPoint ? (() => {
                     const isGhost = activeCar === 'ghost';
                     const rawDelta = activeCompPoint.delta;
-                    const relativeDelta = isGhost ? -rawDelta : rawDelta;
+                    const relativeDelta = Number.isFinite(rawDelta) ? (isGhost ? -rawDelta : rawDelta) : 0;
                     const otherSpeed = isGhost
                       ? Math.round(activePoint?.speed || 0)
                       : Math.round(activeCompPoint.comp?.speed || activeCompPoint.speed || 0);
@@ -2849,16 +2861,16 @@ export default function Track3DModal({
               <div style={{ color: '#6b7785', fontWeight: '700', marginBottom: '4px' }}>
                 SECTOR GAIN / LOSS APEX
               </div>
-              {comparisonData.max_gain && (
+              {comparisonData.max_gain && Number.isFinite(comparisonData.max_gain.diff) && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: '#3fd68c', marginBottom: '2px' }}>
                   <span>Max Time Gained:</span>
-                  <span className="mono"><strong>{comparisonData.max_gain.diff.toFixed(2)}s</strong> @ {Math.round(comparisonData.max_gain.speed)} km/h</span>
+                  <span className="mono"><strong>{comparisonData.max_gain.diff.toFixed(2)}s</strong> @ {Math.round(comparisonData.max_gain.speed || 0)} km/h</span>
                 </div>
               )}
-              {comparisonData.max_loss && (
+              {comparisonData.max_loss && Number.isFinite(comparisonData.max_loss.diff) && (
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: '#ff5c5c' }}>
                   <span>Max Time Lost:</span>
-                  <span className="mono"><strong>+{comparisonData.max_loss.diff.toFixed(2)}s</strong> @ {Math.round(comparisonData.max_loss.speed)} km/h</span>
+                  <span className="mono"><strong>+{comparisonData.max_loss.diff.toFixed(2)}s</strong> @ {Math.round(comparisonData.max_loss.speed || 0)} km/h</span>
                 </div>
               )}
             </div>
