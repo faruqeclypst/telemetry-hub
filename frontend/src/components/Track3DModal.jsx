@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { X, Play, Pause, RotateCcw, ZoomIn, ZoomOut, Zap, Sun, Moon, Sunset, Volume2, VolumeX, Video, Camera, Activity, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, Play, Pause, RotateCcw, ZoomIn, ZoomOut, Zap, Sun, Moon, Sunset, Volume2, VolumeX, Video, Activity, Gauge, ChevronDown, ChevronUp } from 'lucide-react';
 import {
   buildSplineFromSamples,
   buildRoadRibbon,
@@ -41,7 +41,7 @@ export default function Track3DModal({
   // High-level playback controls
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const [cameraMode, setCameraMode] = useState('chase'); // 'chase', 'cockpit', 'broadcast', 'topdown', 'orbit'
+  const [cameraMode, setCameraMode] = useState('chase'); // 'chase', 'hood', 'broadcast', 'topdown', 'orbit'
   const [lightingMode, setLightingMode] = useState('night'); // 'day', 'sunset', 'night'
   const [isAudioMuted, setIsAudioMuted] = useState(true);
   const [broadcastStandName, setBroadcastStandName] = useState('');
@@ -62,6 +62,10 @@ export default function Track3DModal({
   // laptops and phones instead of letting the sidebar and toolbar eat the view.
   const [layoutTier, setLayoutTier] = useState('wide');
 
+  // Compact on-canvas telemetry strip, independent of the side HUD panel so the
+  // live numbers stay visible when the panel is hidden or the screen is narrow.
+  const [showTelemetryOverlay, setShowTelemetryOverlay] = useState(true);
+
   // Chase Camera Smoothing Refs (Zero-Jitter critically damped crane)
   const chasePosRef = useRef(new THREE.Vector3());
   const chaseLookTargetRef = useRef(new THREE.Vector3());
@@ -74,6 +78,8 @@ export default function Track3DModal({
   // wheel dolly and makes the view lurch and spin.
   const orbitInitRef = useRef(false);
   const orbitFocusRef = useRef(null);
+  const orbitPrevTargetRef = useRef(new THREE.Vector3());
+  const orbitRigDeltaRef = useRef(new THREE.Vector3());
 
   // Animation & Rendering Refs (60 FPS direct engine)
   const replayTimeRef = useRef(0);
@@ -182,7 +188,7 @@ export default function Track3DModal({
       } else if (e.key === '1') {
         setCameraMode('chase');
       } else if (e.key === '2') {
-        setCameraMode('cockpit');
+        setCameraMode('hood');
       } else if (e.key === '3') {
         setCameraMode('broadcast');
       } else if (e.key === '4') {
@@ -198,6 +204,9 @@ export default function Track3DModal({
       } else if (e.key === 'h' || e.key === 'H') {
         e.preventDefault();
         setShowHud(curr => !curr);
+      } else if (e.key === 'd' || e.key === 'D') {
+        e.preventDefault();
+        setShowTelemetryOverlay(v => !v);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -799,6 +808,7 @@ export default function Track3DModal({
       const targetHeading = isGhostActive ? ghostAttitude.heading : carHeading;
       const targetRoll = isGhostActive ? ghostAttitude.roll : attitude.roll;
       const targetSpeed = isGhostActive ? ghostSpeed : speed;
+      const targetCarObj = isGhostActive ? ghostCarRef.current : carRef.current;
 
       if (cameraRef.current && controlsRef.current && (carRef.current || ghostCarRef.current)) {
         const mode = cameraModeRef.current;
@@ -812,12 +822,12 @@ export default function Track3DModal({
           orbitFocusRef.current = null;
         }
 
-        // Hide focused car's roof tag in hood/cockpit mode so view stays unobstructed
+        // Hide the focused car's roof tag in first-person so the view stays clear
         if (carRef.current?.userData?.labelObj?.sprite) {
-          carRef.current.userData.labelObj.sprite.visible = !(mode === 'cockpit' && !isGhostActive);
+          carRef.current.userData.labelObj.sprite.visible = !(mode === 'hood' && !isGhostActive);
         }
         if (ghostCarRef.current?.userData?.labelObj?.sprite) {
-          ghostCarRef.current.userData.labelObj.sprite.visible = !(mode === 'cockpit' && isGhostActive);
+          ghostCarRef.current.userData.labelObj.sprite.visible = !(mode === 'hood' && isGhostActive);
         }
 
         if (mode === 'chase') {
@@ -876,22 +886,43 @@ export default function Track3DModal({
 
           cameraRef.current.position.copy(chasePosRef.current);
           cameraRef.current.lookAt(chaseLookTargetRef.current);
-        } else if (mode === 'cockpit') {
+        } else if (mode === 'hood') {
           controlsRef.current.enabled = false;
           isChaseCamInitRef.current = false;
           chaseCamHeadingRef.current = null;
+
+          // First-person view built in the car's own frame so it follows yaw,
+          // road pitch and body roll correctly. The eye sits just above the
+          // cowl, ahead of the windshield base.
           const speedRatio = Math.min(1.0, Math.max(0, (targetSpeed - 70) / 180));
           const dynamicFov = Math.max(40, Math.min(52, 43 + speedRatio * 7.0));
           cameraRef.current.fov = dynamicFov;
-          const hoodX = targetX + Math.sin(targetHeading) * 1.5;
-          const hoodZ = targetZ + Math.cos(targetHeading) * 1.5;
-          const carPitch = (isGhostActive ? ghostPose?.pitch : carPose?.pitch) || 0;
-          cameraRef.current.position.set(hoodX, targetY + 1.35 + targetRoll * 1.0, hoodZ);
-          cameraRef.current.lookAt(
-            targetX + Math.sin(targetHeading) * 45,
-            targetY + 1.2 - Math.sin(carPitch) * 35,
-            targetZ + Math.cos(targetHeading) * 45
-          );
+
+          // Use the car's actual world pitch (body pitch + road slope) so the
+          // onboard dips with the circuit instead of staring at the horizon.
+          const carPitch = targetCarObj ? targetCarObj.rotation.x : 0;
+
+          // Local eye offset (metres) in car space: +Z is forward, +Y is up.
+          const eyeForward = 0.95;
+          const eyeUp = 0.94;
+
+          const sinH = Math.sin(targetHeading);
+          const cosH = Math.cos(targetHeading);
+          const eyeX = targetX + eyeForward * sinH;
+          const eyeZ = targetZ + eyeForward * cosH;
+          const eyeY = targetY + eyeUp;
+
+          cameraRef.current.position.set(eyeX, eyeY, eyeZ);
+
+          // Look down the car's forward axis, falling with the road pitch.
+          const lookDist = 45;
+          const lookX = targetX + sinH * lookDist;
+          const lookZ = targetZ + cosH * lookDist;
+          const lookY = eyeY - Math.tan(carPitch) * lookDist - 0.15;
+          cameraRef.current.lookAt(lookX, lookY, lookZ);
+
+          // Bank the view with the body so cornering reads like a real onboard.
+          cameraRef.current.rotateZ(targetRoll);
           cameraRef.current.updateProjectionMatrix();
         } else if (mode === 'broadcast') {
           controlsRef.current.enabled = false;
@@ -922,28 +953,41 @@ export default function Track3DModal({
           cameraRef.current.position.set(targetX, targetY + altitude, targetZ);
           cameraRef.current.lookAt(targetX, targetY, targetZ);
         } else {
-          // Free Orbit. Anchor the target once per entry (or when the focused
-          // car changes) and let OrbitControls drive thereafter, otherwise the
-          // per-frame re-target fights the user's zoom and pan.
+          // Free Orbit. OrbitControls owns the angle and distance, but the car
+          // keeps moving, so the whole rig (camera + target) is translated by
+          // the car's per-frame delta. That keeps the user's orbit framing while
+          // the subject stays centred, instead of leaving the camera orbiting an
+          // empty patch of track.
           controlsRef.current.enabled = true;
           isChaseCamInitRef.current = false;
           chaseCamHeadingRef.current = null;
+
           const focusKey = `${isGhostActive ? 'ghost' : 'driver'}:${activeCarRef.current}`;
+          const desiredTarget = new THREE.Vector3(targetX, targetY + 0.5, targetZ);
+
           if (!orbitInitRef.current || orbitFocusRef.current !== focusKey) {
             orbitInitRef.current = true;
             orbitFocusRef.current = focusKey;
-            // Re-apply the dolly limits in case a guided mode left different
-            // expectations, then seed from a sensible offset so entering orbit
-            // always shows the car rather than a stale teleported camera.
+            // Re-apply dolly limits in case a guided mode left different
+            // expectations, then seed a sensible entry framing.
             controlsRef.current.minDistance = 4;
             controlsRef.current.maxDistance = 2500;
             const orbitDist = Math.max(8.0, Math.min(30.0, 14.0 / currentZoom));
             cameraRef.current.position.set(
-              targetX - Math.sin(targetHeading) * orbitDist,
-              targetY + orbitDist * 0.45,
-              targetZ - Math.cos(targetHeading) * orbitDist
+              desiredTarget.x - Math.sin(targetHeading) * orbitDist,
+              desiredTarget.y + orbitDist * 0.45,
+              desiredTarget.z - Math.cos(targetHeading) * orbitDist
             );
-            controlsRef.current.target.set(targetX, targetY + 0.5, targetZ);
+            controlsRef.current.target.copy(desiredTarget);
+            orbitPrevTargetRef.current.copy(desiredTarget);
+            controlsRef.current.update();
+          } else {
+            // Rigidly translate the rig with the car: shift the camera by the
+            // same delta as the target so orbit angle and distance are kept.
+            orbitRigDeltaRef.current.subVectors(desiredTarget, orbitPrevTargetRef.current);
+            cameraRef.current.position.add(orbitRigDeltaRef.current);
+            controlsRef.current.target.add(orbitRigDeltaRef.current);
+            orbitPrevTargetRef.current.copy(desiredTarget);
             controlsRef.current.update();
           }
         }
@@ -1594,9 +1638,9 @@ export default function Track3DModal({
               Chase
             </button>
             <button
-              className={`btn btn-sm ${cameraMode === 'cockpit' ? 'btn-primary' : ''}`}
-              onClick={() => setCameraMode('cockpit')}
-              aria-pressed={cameraMode === 'cockpit'}
+              className={`btn btn-sm ${cameraMode === 'hood' ? 'btn-primary' : ''}`}
+              onClick={() => setCameraMode('hood')}
+              aria-pressed={cameraMode === 'hood'}
               style={{ border: 'none', padding: '0.2rem 0.48rem' }}
               title="Hood Cam [2]"
             >
@@ -1670,6 +1714,18 @@ export default function Track3DModal({
           >
             <Activity size={12} />
             HUD
+          </button>
+
+          {/* Toggle on-canvas telemetry strip */}
+          <button
+            className={`btn btn-sm ${showTelemetryOverlay ? 'btn-primary' : ''}`}
+            onClick={() => setShowTelemetryOverlay(v => !v)}
+            aria-pressed={showTelemetryOverlay}
+            style={{ padding: '0.2rem 0.55rem', display: 'flex', alignItems: 'center', gap: '4px' }}
+            title="Toggle the on-canvas telemetry strip"
+          >
+            <Gauge size={12} />
+            Live data
           </button>
 
           <button 
@@ -1812,6 +1868,98 @@ export default function Track3DModal({
             </button>
           </div>
         )}
+
+        {/* ------------------------------------------------------------------ */}
+        {/* ON-CANVAS TELEMETRY OVERLAY (broadcast style, top-left)            */}
+        {/* ------------------------------------------------------------------ */}
+        {viewportState === 'ready' && showTelemetryOverlay && hudTelemetry && (() => {
+          const t = hudTelemetry;
+          const accent = activeCar === 'ghost' ? '#35c7f0' : '#ff8a3d';
+          const rpmPct = Math.min(100, ((t.rpm || 0) / 8000) * 100);
+          const rpmRed = (t.rpm || 0) > 7300;
+          const throttle = Math.max(0, Math.min(100, t.throttle || 0));
+          const brake = Math.max(0, Math.min(100, t.brake || 0));
+          const overlayTop = isComparing ? '58px' : '16px';
+          return (
+            <div style={{
+              position: 'absolute',
+              top: overlayTop,
+              left: isCompact ? '10px' : '16px',
+              width: isCompact ? '172px' : '208px',
+              background: 'rgba(10, 14, 22, 0.88)',
+              backdropFilter: 'blur(8px)',
+              border: '1px solid #232b36',
+              borderRadius: '8px',
+              padding: '0.55rem 0.65rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.45rem',
+              zIndex: 15,
+              boxShadow: '0 6px 22px rgba(0,0,0,0.6)',
+              pointerEvents: 'none'
+            }}>
+              {/* Speed + gear */}
+              <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: '0.5rem' }}>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px' }}>
+                  <span className="mono" style={{ fontSize: isCompact ? '1.5rem' : '1.75rem', fontWeight: 800, color: accent, lineHeight: 1 }}>
+                    {Math.round(t.speed || 0)}
+                  </span>
+                  <span style={{ fontSize: '0.62rem', color: '#6b7785' }}>km/h</span>
+                </div>
+                <span className="mono" style={{ fontSize: isCompact ? '1.3rem' : '1.5rem', fontWeight: 800, color: '#facc15', lineHeight: 1 }}>
+                  {t.gear ? `G${t.gear}` : 'N'}
+                </span>
+              </div>
+
+              {/* RPM bar */}
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.58rem', color: '#9aa6b2', marginBottom: '2px' }}>
+                  <span style={{ fontWeight: 700 }}>RPM</span>
+                  <span className="mono" style={{ color: rpmRed ? '#ff5c5c' : '#c084fc', fontWeight: 700 }}>
+                    {Math.round(t.rpm || 0)}
+                  </span>
+                </div>
+                <div style={{ height: 5, background: '#1e2530', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ width: `${rpmPct}%`, height: '100%', background: rpmRed ? '#ff5c5c' : '#c084fc', transition: 'width 0.08s linear' }} />
+                </div>
+              </div>
+
+              {/* Throttle / brake bars */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <span style={{ fontSize: '0.55rem', color: '#6b7785', width: '34px', fontWeight: 700 }}>THR</span>
+                  <div style={{ flex: 1, height: 5, background: '#1e2530', borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ width: `${throttle}%`, height: '100%', background: '#3fd68c' }} />
+                  </div>
+                  <span className="mono" style={{ fontSize: '0.55rem', color: '#9aa6b2', width: '24px', textAlign: 'right' }}>
+                    {Math.round(throttle)}%
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                  <span style={{ fontSize: '0.55rem', color: '#6b7785', width: '34px', fontWeight: 700 }}>BRK</span>
+                  <div style={{ flex: 1, height: 5, background: '#1e2530', borderRadius: 3, overflow: 'hidden' }}>
+                    <div style={{ width: `${brake}%`, height: '100%', background: '#ff5c5c' }} />
+                  </div>
+                  <span className="mono" style={{ fontSize: '0.55rem', color: '#9aa6b2', width: '24px', textAlign: 'right' }}>
+                    {Math.round(brake)}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Steering + lateral G */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', borderTop: '1px solid #1e2530', paddingTop: '4px' }}>
+                <span style={{ color: '#6b7785' }}>
+                  STR <strong className="mono" style={{ color: '#e8edf2' }}>{Math.round(t.steering || 0)}&deg;</strong>
+                </span>
+                <span style={{ color: '#6b7785' }}>
+                  G <strong className="mono" style={{ color: (t.lat_g || 0) < 0 ? '#35c7f0' : '#ff8a3d' }}>
+                    {(t.lat_g || 0).toFixed(2)}
+                  </strong>
+                </span>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* ------------------------------------------------------------------ */}
         {/* FLOATING MINIMAP HUD (Bottom-Left)                                 */}
@@ -3480,7 +3628,7 @@ function updateCarFocusVisual(carGroup, isFocused, isComparing = false, cameraMo
 
   if (labelObj && labelObj.sprite) {
     // Only show 3D floating tag when comparing 2 cars and not in first-person camera
-    const isFirstPerson = cameraMode === 'hood' || cameraMode === 'cockpit';
+    const isFirstPerson = cameraMode === 'hood';
     labelObj.sprite.visible = isComparing && !isFirstPerson;
     if (labelObj.sprite.visible) {
       updateCarLabelTexture(labelObj, isFocused);
