@@ -676,7 +676,7 @@ export default function Track3DModal({
         );
         carHeading = attitude.heading;
 
-        carRef.current.position.set(carX, carY + 0.38, carZ);
+        carRef.current.position.set(carX, carY + CAR_RIDE_HEIGHT, carZ);
         carRef.current.rotation.set(attitude.pitch + roadPitch, carHeading, attitude.roll, 'YXZ');
       }
 
@@ -733,7 +733,7 @@ export default function Track3DModal({
             dt,
             { yawRateLimit: Math.max(4.0, Math.min(10.0, 3.0 + ghostSpeed * 0.04)), headingAlpha: 24.0 }
           );
-          ghostCarRef.current.position.set(ghostPose.x, ghostY + 0.38, ghostPose.z);
+          ghostCarRef.current.position.set(ghostPose.x, ghostY + CAR_RIDE_HEIGHT, ghostPose.z);
           ghostCarRef.current.rotation.set(
             ghostAttitude.pitch + ghostRoadPitch,
             ghostAttitude.heading,
@@ -3179,6 +3179,13 @@ function createStartFinishTexture() {
 const TRACK_HALF_WIDTH = 6.0;
 const KERB_WIDTH = 1.35;
 const VERGE_WIDTH = 4.0;
+
+// The road ribbon renders its asphalt `surfaceY` metres above the spline line
+// (see buildRoadRibbon). Wheel pivots are authored with the axle at wheel-centre
+// height, so the tire contact patch already lands on the car group origin. The
+// origin therefore only needs lifting by the asphalt thickness to sit on the
+// visible road, instead of the old 0.38m offset that left the car hovering.
+const CAR_RIDE_HEIGHT = 0.02;
 
 function buildTrackMesh(scene, spline) {
   if (!spline || spline.sampleCount < 8) return null;

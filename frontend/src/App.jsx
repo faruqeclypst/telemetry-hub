@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Activity, Plus, Box, AlertTriangle } from 'lucide-react';
 import SessionHeader from './components/SessionHeader';
 import TelemetryChart from './components/TelemetryChart';
+import HeadToHeadPanel from './components/HeadToHeadPanel';
 import TrackMap from './components/TrackMap';
 import LapTable from './components/LapTable';
 import CornerPanel from './components/CornerPanel';
@@ -318,6 +319,7 @@ export default function App() {
   }, [corners, activeCornerId, hoverIndex, telemetrySamples.length]);
 
   const activeLap = sessionData?.laps?.find((l) => l.lap_number === selectedLap) || null;
+  const compareLapData = sessionData?.laps?.find((l) => l.lap_number === compareLap) || null;
   const hasSessions = sessions.length > 0;
 
   // A comparison needs a second flying lap. Without one the control is
@@ -451,6 +453,23 @@ export default function App() {
                     onSeekReady={(fn) => {
                       seekRef.current = fn;
                     }}
+                  />
+                </ErrorBoundary>
+
+                <ErrorBoundary title="Head to head panel failed">
+                  <HeadToHeadPanel
+                    comparisonData={comparisonData}
+                    isComparing={isComparing}
+                    refLapNumber={selectedLap}
+                    compLapNumber={compareLap}
+                    refLapTime={activeLap?.lap_time ?? null}
+                    compLapTime={compareLapData?.lap_time ?? null}
+                    trackName={sessionData.track_name}
+                    hoverIndex={hoverIndex}
+                    onHoverIndex={setHoverIndex}
+                    sampleCount={telemetrySamples.length}
+                    loading={telemetryLoading}
+                    error={telemetryError}
                   />
                 </ErrorBoundary>
 
